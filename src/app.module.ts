@@ -2,6 +2,12 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserModule } from './user/user.module';
+import { PlanModule } from './plan/plan.module';
+import { PaymentMethodModule } from './payment-method/payment-method.module';
+import { SubscriptionModule } from './subscription/subscription.module';
+import { PaymentModule } from './payment/payment.module';
+import { WebhookEventModule } from './webhook-event/webhook-event.module';
+import { AuditLogModule } from './audit-log/audit-log.module';
 
 @Module({
   imports: [
@@ -25,6 +31,12 @@ import { UserModule } from './user/user.module';
       }),
     }),
     UserModule,
+    PlanModule,
+    PaymentMethodModule,
+    SubscriptionModule,
+    PaymentModule,
+    WebhookEventModule,
+    AuditLogModule,
   ],
 })
 export class AppModule {}
