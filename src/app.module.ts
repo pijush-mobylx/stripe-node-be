@@ -8,6 +8,7 @@ import { SubscriptionModule } from './subscription/subscription.module';
 import { PaymentModule } from './payment/payment.module';
 import { WebhookEventModule } from './webhook-event/webhook-event.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
+import { PaymentProviderModule } from './payment-provider/payment-provider.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { AuditLogModule } from './audit-log/audit-log.module';
     PaymentModule,
     WebhookEventModule,
     AuditLogModule,
+    PaymentProviderModule,
   ],
 })
 export class AppModule {}

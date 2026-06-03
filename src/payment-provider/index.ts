@@ -4,3 +4,6 @@ export * from './dto/create-subscription.dto';
 export * from './dto/refund.dto';
 export * from './dto/webhook.dto';
 export * from './dto/payment-status.dto';
+export * from './providers/stripe.provider';
+export * from './payment-provider.factory';
+export * from './payment-provider.module';
