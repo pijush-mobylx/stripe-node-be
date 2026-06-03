@@ -22,4 +22,8 @@ export class User {
   @ApiProperty({ example: false })
   @Column({ default: false })
   isPremium: boolean;
+
+  @ApiProperty({ example: 'basic', enum: ['basic', 'pro', 'pro_plus'] })
+  @Column({ default: 'basic' })
+  plan: string;
 }
