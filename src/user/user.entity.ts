@@ -3,8 +3,6 @@ import {
   Entity,
   PrimaryGeneratedColumn,
   Column,
-  CreateDateColumn,
-  UpdateDateColumn,
 } from 'typeorm';
 
 @Entity('users')
@@ -17,26 +15,7 @@ export class User {
   @Column({ unique: true })
   email: string;
 
-  @ApiProperty({ example: 'John' })
+  @ApiProperty({ example: 'John Doe' })
   @Column()
-  firstName: string;
-
-  @ApiProperty({ example: 'Doe' })
-  @Column()
-  lastName: string;
-
-  @Column({ select: false })
-  password: string;
-
-  @ApiProperty({ example: true })
-  @Column({ default: true })
-  isActive: boolean;
-
-  @ApiProperty()
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @ApiProperty()
-  @UpdateDateColumn()
-  updatedAt: Date;
+  name: string;
 }
