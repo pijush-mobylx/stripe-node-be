@@ -18,4 +18,8 @@ export class User {
   @ApiProperty({ example: 'John Doe' })
   @Column()
   name: string;
+
+  @ApiProperty({ example: false })
+  @Column({ default: false })
+  isPremium: boolean;
 }
