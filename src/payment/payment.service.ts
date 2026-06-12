@@ -44,7 +44,7 @@ export class PaymentService {
       providerName: dto.providerName,
       providerIntentId: session.providerIntentId,
       amount: dto.amount,
-      status: PaymentStatus.PENDING,
+      status: PaymentStatus.INITIATED,
       frozen: false,
       orderId: dto.orderId ?? null,
       subscriptionId: dto.subscriptionId ?? null,
@@ -57,7 +57,7 @@ export class PaymentService {
       entityType: 'payment',
       entityId: saved.id,
       fromStatus: null,
-      toStatus: PaymentStatus.PENDING,
+      toStatus: PaymentStatus.INITIATED,
       triggeredBy: 'user',
       triggeredById: dto.userId,
       metadata: { providerIntentId: session.providerIntentId, clientSecret: session.clientSecret },
@@ -75,7 +75,7 @@ export class PaymentService {
     if (payment.frozen) {
       throw new BadRequestException('Payment is frozen and cannot be retried.');
     }
-    if (payment.status === PaymentStatus.SUCCEEDED) {
+    if (payment.status === PaymentStatus.SUCCESS) {
       throw new BadRequestException('Payment already succeeded.');
     }
 
@@ -146,7 +146,7 @@ export class PaymentService {
   async refundPayment(paymentId: string, dto: RefundPaymentDto): Promise<Payment> {
     const payment = await this.findOneOrFail(paymentId);
 
-    if (payment.status !== PaymentStatus.SUCCEEDED) {
+    if (payment.status !== PaymentStatus.SUCCESS) {
       throw new BadRequestException('Only succeeded payments can be refunded.');
     }
 

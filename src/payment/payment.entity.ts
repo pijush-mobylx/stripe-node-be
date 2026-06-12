@@ -15,15 +15,16 @@ import { Subscription } from '../subscription/subscription.entity';
 export enum PaymentType {
   ONE_TIME = 'ONE_TIME',
   SUBSCRIPTION = 'SUBSCRIPTION',
+  MARKETPLACE_ORDER = 'MARKETPLACE_ORDER', // declared — implementation deferred
 }
 
 export enum PaymentStatus {
-  PENDING = 'pending',
-  SUCCEEDED = 'succeeded',
-  FAILED = 'failed',
-  CANCELED = 'canceled',
-  REFUNDED = 'refunded',
-  REQUIRES_ACTION = 'requires_action',
+  INITIATED    = 'initiated',
+  SUCCESS      = 'success',
+  FAILED       = 'failed',
+  NEEDS_REVIEW = 'needs_review',
+  EXPIRED      = 'expired',
+  REFUNDED     = 'refunded',   // retained for future refund flow
 }
 
 @Entity('payments')
@@ -90,7 +91,7 @@ export class Payment {
   amount: number;
 
   @ApiProperty({ enum: PaymentStatus })
-  @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING })
+  @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.INITIATED })
   status: PaymentStatus;
 
   @ApiProperty()

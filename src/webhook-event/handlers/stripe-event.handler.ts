@@ -52,9 +52,9 @@ export class StripeEventHandler {
     }
 
     const prev = payment.status;
-    payment.status = PaymentStatus.SUCCEEDED;
+    payment.status = PaymentStatus.SUCCESS;
     await this.paymentRepo.save(payment);
-    await this.audit('payment', payment.id, prev, PaymentStatus.SUCCEEDED, 'stripe_webhook', intentId);
+    await this.audit('payment', payment.id, prev, PaymentStatus.SUCCESS, 'stripe_webhook', intentId);
 
     this.logger.log(`Payment ${payment.id} marked SUCCEEDED`);
   }
