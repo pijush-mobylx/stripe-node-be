@@ -12,6 +12,7 @@ import { WebhookEventModule } from './webhook-event/webhook-event.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
 import { PaymentProviderModule } from './payment-provider/payment-provider.module';
 import { AuthModule } from './auth/auth.module';
+import { ProvisioningOutboxModule } from './provisioning-outbox/provisioning-outbox.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { AuthModule } from './auth/auth.module';
     AuditLogModule,
     PaymentProviderModule,
     AuthModule,
+    ProvisioningOutboxModule,
   ],
 })
 export class AppModule {}
