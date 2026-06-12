@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main",
-    "start:dev": "nodemon",
+    "dev": "nodemon",
     "start:prod": "node dist/main"
   },
   "dependencies": {
