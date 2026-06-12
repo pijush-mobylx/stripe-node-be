@@ -13,6 +13,7 @@ import { AuditLogModule } from './audit-log/audit-log.module';
 import { PaymentProviderModule } from './payment-provider/payment-provider.module';
 import { AuthModule } from './auth/auth.module';
 import { ProvisioningOutboxModule } from './provisioning-outbox/provisioning-outbox.module';
+import { PaymentCallbackModule } from './payment-callback/payment-callback.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { ProvisioningOutboxModule } from './provisioning-outbox/provisioning-out
     PaymentProviderModule,
     AuthModule,
     ProvisioningOutboxModule,
+    PaymentCallbackModule,
   ],
 })
 export class AppModule {}

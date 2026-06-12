@@ -1,82 +1,51 @@
 import {
   Injectable,
   Logger,
-  NotFoundException,
-  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { QueryFailedError, Repository } from 'typeorm';
 
 import { WebhookEvent, WebhookStatus } from './webhook-event.entity';
 import { PaymentProviderFactory } from '../payment-provider/payment-provider.factory';
-import { StripeEventHandler } from './handlers/stripe-event.handler';
-
-type EventHandlerFn = (type: string, payload: Record<string, unknown>) => Promise<void>;
+import { PaymentCallbackService } from '../payment-callback/payment-callback.service';
 
 @Injectable()
 export class WebhookHandlerFactory {
   private readonly logger = new Logger(WebhookHandlerFactory.name);
-  private readonly handlerRegistry = new Map<string, EventHandlerFn>();
 
   constructor(
     @InjectRepository(WebhookEvent)
     private readonly webhookRepo: Repository<WebhookEvent>,
     private readonly providerFactory: PaymentProviderFactory,
-    private readonly stripeHandler: StripeEventHandler,
-  ) {
-    this.handlerRegistry.set('stripe', (type, payload) =>
-      this.stripeHandler.handle(type, payload),
-    );
-    // RazorPay and Paytm handlers registered here later:
-    // this.handlerRegistry.set('razorpay', (type, payload) => this.razorpayHandler.handle(type, payload));
-  }
+    private readonly callbackService: PaymentCallbackService,
+  ) {}
 
   // ─── processWebhook ───────────────────────────────────────────────────────
-  // Entry point called by the controller for each inbound webhook request
 
   async processWebhook(
     providerName: string,
     rawBody: Buffer,
     signature: string,
   ): Promise<{ received: boolean }> {
-    // 1. Verify signature via the correct provider
+    // 1. Verify signature
     const provider = this.providerFactory.getProvider(providerName);
     const event = await provider.verifyWebhook({ rawBody, signature });
 
-    // 2. Idempotency — deduplicate by (providerName + providerEventId)
+    // 2. Dedup insert — unique index on (providerName, providerEventId)
     const record = await this.saveEventRecord(providerName, event);
     if (!record) {
       this.logger.log(`Duplicate webhook ignored: ${event.providerEventId}`);
       return { received: true };
     }
 
-    // 3. Dispatch to the appropriate handler
+    // 3. 6-step pipeline (idempotency → validate → tamper → atomic write → mark → emit)
     try {
-      const handler = this.handlerRegistry.get(providerName.toLowerCase());
-
-      if (!handler) {
-        throw new NotFoundException(`No handler registered for provider "${providerName}"`);
-      }
-
-      await handler(event.type, event.payload);
-
-      await this.webhookRepo.update(record.id, {
-        status: WebhookStatus.PROCESSED,
-        processedAt: new Date(),
-      });
-
-      this.logger.log(`Webhook ${event.providerEventId} (${event.type}) processed`);
+      await this.callbackService.process(record, event);
     } catch (err) {
-      await this.webhookRepo.update(record.id, {
-        status: WebhookStatus.FAILED,
-        retryCount: record.retryCount + 1,
-        lastError: (err as Error).message,
-      });
-
+      // callbackService already updated the record status; just rethrow for HTTP 500
       this.logger.error(
-        `Webhook ${event.providerEventId} failed: ${(err as Error).message}`,
+        `Webhook ${event.providerEventId} pipeline failed: ${(err as Error).message}`,
       );
-
       throw err;
     }
 
