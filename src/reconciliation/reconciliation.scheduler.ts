@@ -84,7 +84,7 @@ export class ReconciliationScheduler {
 
   private async healPayment(payment: Payment): Promise<void> {
     try {
-      const provider = this.providerFactory.getProvider(payment.providerName);
+      const provider = await this.providerFactory.getProvider(payment.providerName);
       const result = await provider.getPaymentOrderStatus(payment.providerIntentId);
 
       const targetStatus = PROVIDER_STATUS_MAP[result.status] ?? null;

@@ -28,7 +28,7 @@ export class WebhookHandlerFactory {
     signature: string,
   ): Promise<{ received: boolean }> {
     // 1. Verify signature
-    const provider = this.providerFactory.getProvider(providerName);
+    const provider = await this.providerFactory.getProvider(providerName);
     const event = await provider.verifyWebhook({ rawBody, signature });
 
     // 2. Dedup insert — unique index on (providerName, providerEventId)

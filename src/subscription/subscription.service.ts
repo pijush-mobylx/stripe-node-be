@@ -43,7 +43,7 @@ export class SubscriptionService {
     await this.ensureUserExists(dto.userId);
 
     const providerName = dto.providerName ?? plan.providerName;
-    const provider = this.providerFactory.getProvider(providerName);
+    const provider = await this.providerFactory.getProvider(providerName);
 
     const result = await provider.createSubscription({
       userId: dto.userId,
@@ -98,7 +98,7 @@ export class SubscriptionService {
     const plan = await this.planRepo.findOne({ where: { id: newPlanId } });
     if (!plan) throw new NotFoundException(`Plan #${newPlanId} not found`);
 
-    const provider = this.providerFactory.getProvider(sub.providerName);
+    const provider = await this.providerFactory.getProvider(sub.providerName);
 
     const result = await provider.renewSubscription(sub.providerSubId);
 
@@ -141,7 +141,7 @@ export class SubscriptionService {
     }
 
     const atPeriodEnd = dto.atPeriodEnd ?? true;
-    const provider = this.providerFactory.getProvider(sub.providerName);
+    const provider = await this.providerFactory.getProvider(sub.providerName);
 
     const result = await provider.cancelSubscription(sub.providerSubId, atPeriodEnd);
 
@@ -178,7 +178,7 @@ export class SubscriptionService {
 
   async renewSub(subscriptionId: string, dto: RenewSubscriptionDto): Promise<Subscription> {
     const sub = await this.findOneOrFail(subscriptionId);
-    const provider = this.providerFactory.getProvider(sub.providerName);
+    const provider = await this.providerFactory.getProvider(sub.providerName);
 
     const result = await provider.renewSubscription(sub.providerSubId, dto.newProviderPmId);
 

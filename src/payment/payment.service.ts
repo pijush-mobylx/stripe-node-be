@@ -37,7 +37,7 @@ export class PaymentService {
     if (!plan) throw new NotFoundException(`Plan #${dto.planId} not found`);
     if (!plan.isActive) throw new BadRequestException(`Plan #${dto.planId} is inactive`);
 
-    const provider = this.providerFactory.getProviderByPlanConfig({
+    const provider = await this.providerFactory.getProviderByPlanConfig({
       providerName: plan.providerName,
       currency: plan.currency,
     });
@@ -81,7 +81,7 @@ export class PaymentService {
   // ─── createPayment ────────────────────────────────────────────────────────
 
   async createPayment(dto: CreatePaymentDto): Promise<Payment> {
-    const provider = this.providerFactory.getProvider(dto.providerName);
+    const provider = await this.providerFactory.getProvider(dto.providerName);
 
     const session = await provider.createSession({
       userId: dto.userId,
@@ -132,7 +132,7 @@ export class PaymentService {
       throw new BadRequestException('Payment already succeeded.');
     }
 
-    const provider = this.providerFactory.getProvider(payment.providerName);
+    const provider = await this.providerFactory.getProvider(payment.providerName);
     const result = await provider.getStatus(payment.providerIntentId);
 
     const prevStatus = payment.status;
@@ -168,7 +168,7 @@ export class PaymentService {
 
   async syncProviderStatus(paymentId: string): Promise<Payment> {
     const payment = await this.findOneOrFail(paymentId);
-    const provider = this.providerFactory.getProvider(payment.providerName);
+    const provider = await this.providerFactory.getProvider(payment.providerName);
 
     const result = await provider.getStatus(payment.providerIntentId);
 
@@ -203,7 +203,7 @@ export class PaymentService {
       throw new BadRequestException('Only succeeded payments can be refunded.');
     }
 
-    const provider = this.providerFactory.getProvider(payment.providerName);
+    const provider = await this.providerFactory.getProvider(payment.providerName);
 
     await provider.refundPayment({
       providerIntentId: payment.providerIntentId,

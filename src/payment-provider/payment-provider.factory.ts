@@ -1,18 +1,33 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { StripeProvider } from './providers/stripe.provider';
 import type { IPaymentProvider } from './interfaces/payment-provider.interface';
+import { PaymentProviderConfig } from './payment-provider-config.entity';
 
 export interface PlanProviderConfig {
   providerName: string;
   currency: string;
 }
 
+interface CacheEntry {
+  isActive: boolean;
+  expiresAt: number;
+}
+
+const CACHE_TTL_MS = 60_000;
+
 @Injectable()
 export class PaymentProviderFactory {
   private readonly logger = new Logger(PaymentProviderFactory.name);
   private readonly registry = new Map<string, IPaymentProvider>();
+  private readonly configCache = new Map<string, CacheEntry>();
 
-  constructor(private readonly stripeProvider: StripeProvider) {
+  constructor(
+    private readonly stripeProvider: StripeProvider,
+    @InjectRepository(PaymentProviderConfig)
+    private readonly configRepo: Repository<PaymentProviderConfig>,
+  ) {
     this.register(stripeProvider);
   }
 
@@ -22,44 +37,68 @@ export class PaymentProviderFactory {
   }
 
   /**
-   * Returns a provider by name (e.g. "stripe", "razorpay", "paytm").
-   * Throws NotFoundException if the provider is not registered.
+   * Returns an active provider by name.
+   * Throws NotFoundException if not registered, ServiceUnavailableException if inactive.
    */
-  getProvider(name: string): IPaymentProvider {
-    const provider = this.registry.get(name.toLowerCase());
+  async getProvider(name: string): Promise<IPaymentProvider> {
+    const key = name.toLowerCase();
+    const provider = this.registry.get(key);
     if (!provider) {
       throw new NotFoundException(
         `Payment provider "${name}" is not registered. Available: ${[...this.registry.keys()].join(', ')}`,
       );
     }
+    await this.assertActive(key);
     return provider;
   }
 
   /**
-   * Returns a provider based on plan config + currency.
-   * Falls back to "stripe" when no specific mapping is configured.
-   * Extend this method when RazorPay (INR) or Paytm are added.
+   * Returns an active provider based on plan config + currency.
    */
-  getProviderByPlanConfig(config: PlanProviderConfig): IPaymentProvider {
+  async getProviderByPlanConfig(config: PlanProviderConfig): Promise<IPaymentProvider> {
     const name = this.resolveProviderName(config);
     return this.getProvider(name);
   }
 
-  /**
-   * Lists all registered provider names — useful for health checks.
-   */
   getRegisteredProviders(): string[] {
     return [...this.registry.keys()];
   }
 
-  // ─── private ──────────────────────────────────────────────────────────────
+  // ─── isActive check with TTL cache ────────────────────────────────────────
+
+  private async assertActive(providerName: string): Promise<void> {
+    const cached = this.configCache.get(providerName);
+    if (cached && Date.now() < cached.expiresAt) {
+      if (!cached.isActive) this.throwInactive(providerName);
+      return;
+    }
+
+    const config = await this.configRepo.findOne({ where: { providerName } });
+
+    // No DB row means provider is allowed (opt-in model — row required only to disable)
+    const isActive = config ? config.isActive : true;
+
+    this.configCache.set(providerName, {
+      isActive,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+
+    if (!isActive) this.throwInactive(providerName);
+  }
+
+  private throwInactive(providerName: string): never {
+    throw new ServiceUnavailableException(
+      `Payment provider "${providerName}" is currently disabled`,
+    );
+  }
+
+  // ─── currency routing ─────────────────────────────────────────────────────
 
   private resolveProviderName(config: PlanProviderConfig): string {
     if (config.providerName) return config.providerName.toLowerCase();
 
-    // Currency-based fallback routing (extend as new providers are added)
     const currencyMap: Record<string, string> = {
-      inr: 'razorpay',   // placeholder — registered once RazorPay is added
+      inr: 'razorpay',
       usd: 'stripe',
       eur: 'stripe',
       gbp: 'stripe',
