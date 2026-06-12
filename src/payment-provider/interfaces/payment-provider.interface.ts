@@ -1,4 +1,5 @@
 import type { CreateSessionDto, SessionResult } from '../dto/create-session.dto';
+import type { CreateCheckoutSessionDto, ProviderPayload } from '../dto/checkout-session.dto';
 import type {
   CreateSubscriptionDto,
   SubscriptionResult,
@@ -17,6 +18,19 @@ export interface IPaymentProvider {
    * Returns a client secret the frontend uses to confirm the payment.
    */
   createSession(dto: CreateSessionDto): Promise<SessionResult>;
+
+  /**
+   * Create a hosted Checkout Session.
+   * Returns a normalized ProviderPayload; frontend redirects to `url`.
+   */
+  createCheckoutSession(dto: CreateCheckoutSessionDto): Promise<ProviderPayload>;
+
+  /**
+   * Fetch the canonical status of a payment order by provider ID.
+   * Accepts either a Checkout Session ID or a PaymentIntent ID.
+   * Used by ReconciliationScheduler to heal stale INITIATED orders.
+   */
+  getPaymentOrderStatus(providerOrderId: string): Promise<PaymentStatusResult>;
 
   /**
    * Create a recurring subscription for a customer.

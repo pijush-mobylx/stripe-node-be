@@ -5,6 +5,7 @@ const StripeLib = require('stripe');
 
 import type { IPaymentProvider } from '../interfaces/payment-provider.interface';
 import type { CreateSessionDto, SessionResult } from '../dto/create-session.dto';
+import type { CreateCheckoutSessionDto, ProviderPayload } from '../dto/checkout-session.dto';
 import type {
   CreateSubscriptionDto,
   SubscriptionResult,
@@ -169,6 +170,63 @@ export class StripeProvider implements IPaymentProvider {
       type: event.type,
       payload: event.data.object,
     };
+  }
+
+  // ─── createCheckoutSession ────────────────────────────────────────────────
+
+  async createCheckoutSession(dto: CreateCheckoutSessionDto): Promise<ProviderPayload> {
+    const session = await this.stripe.checkout.sessions.create({
+      mode: 'payment',
+      line_items: [
+        {
+          price_data: {
+            currency: dto.currency,
+            unit_amount: dto.amount,
+            product_data: { name: `Plan ${dto.planId}` },
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: dto.successUrl,
+      cancel_url: dto.cancelUrl,
+      client_reference_id: dto.userId,
+      metadata: { userId: dto.userId, planId: dto.planId, ...dto.metadata },
+    });
+
+    this.logger.log(`Created Checkout Session ${session.id} for user ${dto.userId}`);
+
+    return {
+      provider: this.providerName,
+      action: 'REDIRECT',
+      url: session.url as string,
+      sessionId: session.id,
+    };
+  }
+
+  // ─── getPaymentOrderStatus ────────────────────────────────────────────────
+
+  async getPaymentOrderStatus(providerOrderId: string): Promise<PaymentStatusResult> {
+    if (providerOrderId.startsWith('cs_')) {
+      const session = await this.stripe.checkout.sessions.retrieve(providerOrderId);
+      return {
+        providerIntentId: providerOrderId,
+        status: this.mapCheckoutStatus(session.status),
+        amount: session.amount_total ?? 0,
+        currency: session.currency ?? '',
+        frozen: session.status === 'expired',
+      };
+    }
+
+    // Fall back to PaymentIntent for legacy records
+    return this.getStatus(providerOrderId);
+  }
+
+  private mapCheckoutStatus(sessionStatus: string | null): string {
+    switch (sessionStatus) {
+      case 'complete':  return 'success';
+      case 'expired':   return 'expired';
+      default:          return 'initiated';
+    }
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
