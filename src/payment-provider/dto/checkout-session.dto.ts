@@ -1,8 +1,10 @@
 export interface CreateCheckoutSessionDto {
   userId: string;
   planId: string;
-  amount: number;
-  currency: string;
+  /** Stripe Price ID (price_xxx) — fetched from Plan.providerPlanId, never sent by client. */
+  providerPlanId: string;
+  /** ONE_TIME → mode: 'payment' | SUBSCRIPTION → mode: 'subscription' */
+  paymentType: string;
   successUrl: string;
   cancelUrl: string;
   metadata?: Record<string, string>;

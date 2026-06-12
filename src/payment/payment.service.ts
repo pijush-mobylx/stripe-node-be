@@ -7,7 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
-import { Payment, PaymentStatus, PaymentType } from './payment.entity';
+import { Payment, PaymentStatus } from './payment.entity';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { InitiatePaymentDto } from './dto/initiate-payment.dto';
 import { RefundPaymentDto } from './dto/refund-payment.dto';
@@ -45,8 +45,8 @@ export class PaymentService {
     const payload = await provider.createCheckoutSession({
       userId,
       planId: plan.id,
-      amount: plan.amount,
-      currency: plan.currency,
+      providerPlanId: plan.providerPlanId,
+      paymentType: dto.paymentType,
       successUrl: dto.successUrl,
       cancelUrl: dto.cancelUrl,
     });

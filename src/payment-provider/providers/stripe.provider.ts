@@ -175,18 +175,11 @@ export class StripeProvider implements IPaymentProvider {
   // ─── createCheckoutSession ────────────────────────────────────────────────
 
   async createCheckoutSession(dto: CreateCheckoutSessionDto): Promise<ProviderPayload> {
+    const mode = dto.paymentType === 'SUBSCRIPTION' ? 'subscription' : 'payment';
+
     const session = await this.stripe.checkout.sessions.create({
-      mode: 'payment',
-      line_items: [
-        {
-          price_data: {
-            currency: dto.currency,
-            unit_amount: dto.amount,
-            product_data: { name: `Plan ${dto.planId}` },
-          },
-          quantity: 1,
-        },
-      ],
+      mode,
+      line_items: [{ price: dto.providerPlanId, quantity: 1 }],
       success_url: dto.successUrl,
       cancel_url: dto.cancelUrl,
       client_reference_id: dto.userId,
