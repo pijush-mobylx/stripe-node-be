@@ -6,8 +6,11 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  Request,
+  UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBearerAuth,
   ApiOperation,
   ApiParam,
   ApiQuery,
@@ -16,13 +19,27 @@ import {
 } from '@nestjs/swagger';
 import { PaymentService } from './payment.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
+import { InitiatePaymentDto } from './dto/initiate-payment.dto';
 import { RefundPaymentDto } from './dto/refund-payment.dto';
 import { Payment } from './payment.entity';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @ApiTags('payments')
 @Controller('payments')
 export class PaymentController {
   constructor(private readonly paymentService: PaymentService) {}
+
+  @Post('initiate')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Initiate payment — returns provider redirect URL' })
+  @ApiResponse({ status: 201, description: 'ProviderPayload with redirect URL' })
+  initiate(
+    @Request() req: { user: { userId: string } },
+    @Body() dto: InitiatePaymentDto,
+  ) {
+    return this.paymentService.initiatePayment(req.user.userId, dto);
+  }
 
   @Post()
   @ApiOperation({ summary: 'Create a payment intent' })

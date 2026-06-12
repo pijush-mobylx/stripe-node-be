@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ScheduleModule } from '@nestjs/schedule';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { UserModule } from './user/user.module';
 import { PlanModule } from './plan/plan.module';
 import { PaymentMethodModule } from './payment-method/payment-method.module';
@@ -9,6 +11,7 @@ import { PaymentModule } from './payment/payment.module';
 import { WebhookEventModule } from './webhook-event/webhook-event.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
 import { PaymentProviderModule } from './payment-provider/payment-provider.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -16,6 +19,8 @@ import { PaymentProviderModule } from './payment-provider/payment-provider.modul
       isGlobal: true,
       envFilePath: '.env',
     }),
+    ScheduleModule.forRoot(),
+    EventEmitterModule.forRoot(),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -39,6 +44,7 @@ import { PaymentProviderModule } from './payment-provider/payment-provider.modul
     WebhookEventModule,
     AuditLogModule,
     PaymentProviderModule,
+    AuthModule,
   ],
 })
 export class AppModule {}

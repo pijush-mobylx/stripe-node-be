@@ -9,9 +9,12 @@ import { Repository } from 'typeorm';
 
 import { Payment, PaymentStatus, PaymentType } from './payment.entity';
 import { CreatePaymentDto } from './dto/create-payment.dto';
+import { InitiatePaymentDto } from './dto/initiate-payment.dto';
 import { RefundPaymentDto } from './dto/refund-payment.dto';
 import { PaymentProviderFactory } from '../payment-provider/payment-provider.factory';
+import type { ProviderPayload } from '../payment-provider/dto/checkout-session.dto';
 import { AuditLog } from '../audit-log/audit-log.entity';
+import { Plan } from '../plan/plan.entity';
 
 @Injectable()
 export class PaymentService {
@@ -22,8 +25,58 @@ export class PaymentService {
     private readonly paymentRepo: Repository<Payment>,
     @InjectRepository(AuditLog)
     private readonly auditRepo: Repository<AuditLog>,
+    @InjectRepository(Plan)
+    private readonly planRepo: Repository<Plan>,
     private readonly providerFactory: PaymentProviderFactory,
   ) {}
+
+  // ─── initiatePayment (new gateway flow) ──────────────────────────────────
+
+  async initiatePayment(userId: string, dto: InitiatePaymentDto): Promise<ProviderPayload> {
+    const plan = await this.planRepo.findOne({ where: { id: dto.planId } });
+    if (!plan) throw new NotFoundException(`Plan #${dto.planId} not found`);
+    if (!plan.isActive) throw new BadRequestException(`Plan #${dto.planId} is inactive`);
+
+    const provider = this.providerFactory.getProviderByPlanConfig({
+      providerName: plan.providerName,
+      currency: plan.currency,
+    });
+
+    const payload = await provider.createCheckoutSession({
+      userId,
+      planId: plan.id,
+      amount: plan.amount,
+      currency: plan.currency,
+      successUrl: dto.successUrl,
+      cancelUrl: dto.cancelUrl,
+    });
+
+    const payment = this.paymentRepo.create({
+      userId,
+      type: dto.paymentType,
+      providerName: provider.providerName,
+      providerIntentId: payload.sessionId,
+      amount: plan.amount,
+      status: PaymentStatus.INITIATED,
+      frozen: false,
+      planId: plan.id,
+    });
+
+    const saved = await this.paymentRepo.save(payment);
+
+    await this.writeAudit({
+      entityType: 'payment',
+      entityId: saved.id,
+      fromStatus: null,
+      toStatus: PaymentStatus.INITIATED,
+      triggeredBy: 'user',
+      triggeredById: userId,
+      metadata: { sessionId: payload.sessionId, planId: plan.id, currency: plan.currency },
+    });
+
+    this.logger.log(`Payment ${saved.id} initiated — session ${payload.sessionId}`);
+    return payload;
+  }
 
   // ─── createPayment ────────────────────────────────────────────────────────
 
