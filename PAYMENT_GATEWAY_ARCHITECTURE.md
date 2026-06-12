@@ -1,49 +1,36 @@
 # Payment Gateway Architecture — Technical Design Document
-**Document Type:** CTO Review — LLD v2 Analysis  
-**Date:** June 2026  
-**Author:** Engineering Team  
-**Status:** Current Implementation
+**Document Type:** Low-Level Design — Multi-Provider Payment Gateway  
+**Stack:** Node.js · NestJS · TypeORM · PostgreSQL  
+**Author:** Pijush Mandal  
+**Reviewers:** Anurag Abhishek Joshi  
+**Status:** In Progress — Phase 1 (Stripe + CCAvenue)  
+**Last Updated:** June 2026
 
 ---
 
-## 1. Executive Summary
+## 1. Context
 
-This document describes the Payment Gateway system — what it is, what problems the new architecture solves over the previous approach, and a detailed breakdown of every component. The goal is to give leadership a clear picture of the design decisions made, the trade-offs involved, and what capabilities this system now provides.
+Mobylx previously supported a single payment provider (Stripe) integrated directly in business logic with no abstraction layer. As Mobylx expands across multiple markets, the platform requires:
+
+- Multiple providers selected dynamically by currency (AED → CCAvenue, USD → Stripe)
+- A reliable provisioning guarantee — user is always activated even if the server crashes mid-payment
+- Idempotent webhook processing — provider retries never double-provision
+- A reconciliation safety net — missed webhooks are healed automatically
+
+**Scope:** Subscription payments in Phase 1. Marketplace order payments are declared at the interface level but implemented in a subsequent release.
 
 ---
 
-## 2. What Was There Before (Previous Architecture)
+## 2. What Was There Before
 
-The previous payment system had the following characteristics:
-
-### 2.1 Single Provider, Hard-Coded Integration
-- Stripe was the only payment provider, integrated directly inside business logic.
-- There was no abstraction layer — Stripe SDK calls were scattered across service files.
-- Adding a second provider (e.g., Razorpay, CCAvenue) would have required rewriting large portions of business code.
-
-### 2.2 No Payment Order Tracking
-- Payments were initiated and the result was stored directly on the `Orders` table.
-- There was no intermediate `PaymentOrders` record to track lifecycle stages (initiated → processing → completed → failed).
-- A failed payment had no structured retry path — it required manual intervention or a full re-initiation from the frontend.
-
-### 2.3 No Webhook Reliability
-- Webhook events from Stripe arrived and were processed inline — if processing failed mid-way, the event was lost.
-- No idempotency — the same webhook event could trigger duplicate actions (double charge, double subscription creation).
-- No signature verification audit trail.
-
-### 2.4 No Provisioning Guarantee
-- After a payment succeeded, the downstream action (e.g., activating a subscription, adding marketplace add-ons) happened synchronously in the same HTTP request.
-- If that downstream step failed (DB timeout, service crash), the user was charged but never provisioned — a silent data corruption with no recovery path.
-
-### 2.5 No Audit Trail
-- There was no structured record of who changed what, when, and from which state.
-- Debugging a payment dispute required manually tracing across multiple tables with no single source of truth.
-
-### 2.6 Wallet Was Not Integrated
-- Wallet top-ups and wallet balance application to orders were separate, disconnected flows with no transactional linkage to payments.
-
-### 2.7 No Reconciliation
-- If a webhook was missed or the server was down during a payment confirmation, there was no automatic process to check and heal payment state.
+| Problem | Description |
+|---|---|
+| Single provider, hard-coded | Stripe SDK calls scattered across service files. No abstraction layer. |
+| No payment lifecycle tracking | No intermediate `PaymentOrders` record — no retry path for failed payments. |
+| No webhook reliability | Duplicate webhooks could double-provision. No idempotency. |
+| Provisioning in callback | `createSubscription` called synchronously in the webhook handler — a crash left users charged but unprovisioned with no recovery path. |
+| No audit trail | No structured record of state changes. Disputes required manual table tracing. |
+| No reconciliation | Missed webhooks stayed unresolved until manual ops intervention. |
 
 ---
 
@@ -51,426 +38,492 @@ The previous payment system had the following characteristics:
 
 | Problem (Before) | Solution (Now) |
 |---|---|
-| Single provider hard-coded | `IPaymentProvider` interface + `PaymentProviderFactory` — swap/add providers without touching business logic |
-| No payment lifecycle tracking | `PaymentOrders` table with status state machine |
-| Unreliable webhook processing | `WebhookEvent` entity — idempotent, logged before processing |
-| No provisioning guarantee | `ProvisioningOutbox` — polled every 30s, retried until done |
-| No audit trail | `AuditLog` entity — every state change recorded with actor, action, before/after |
-| Wallet disconnected | `WalletTransactions` + `WalletTopupRequests` linked by orderId |
-| No reconciliation | `ReconciliationController` — scheduled every 15 minutes |
-| Duplicate webhook risk | Idempotency key check on `WebhookEvent` before processing |
+| Single provider hard-coded | `IPaymentProvider` interface + `PaymentProviderFactory` — add providers without touching business logic |
+| No payment lifecycle tracking | `PaymentOrders` table with `PaymentOrderStatusEnum` state machine |
+| Duplicate webhooks | `WebhookEvent` idempotency key (unique index on `providerName + providerEventId`) |
+| Provisioning in callback | `ProvisioningOutbox` — written atomically with `PaymentOrders SUCCESS` in one Postgres transaction |
+| No audit trail | `AuditLog` entity — every state change recorded with actor, action, before/after status |
+| No reconciliation | `ReconciliationScheduler` — runs every 15 minutes, heals stale `INITIATED` orders |
 
 ---
 
-## 4. Component Breakdown
+## 4. High-Level Flow
+
+```
+Frontend → POST /payment/initiate  (JWT-authenticated)
+  └── PaymentService
+        ├── SubscriptionService.createPaymentOrder()   — create PaymentOrders record (INITIATED)
+        ├── PaymentProviderFactory.getProviderForCurrency()
+        └── provider.createSession() / createCheckoutSession()
+              └── Return normalised envelope to frontend
+                    { provider, action: FORM_POST|REDIRECT, url, fields, sessionId }
+
+User completes payment → Provider sends webhook
+  └── WebhookController  POST /webhook/stripe  |  POST /webhook/ccavenue
+        └── PaymentCallbackService (6-step pipeline)
+              1. Idempotency check  (WebhookEvent unique insert)
+              2. Provider validation (verifyWebhook — HMAC-SHA256 or AES-CBC)
+              3. Amount tamper check (webhook amount vs PaymentOrders.amount exact integer)
+              4. Atomic Postgres transaction
+                   WRITE PaymentOrders { status: SUCCESS }
+                   WRITE ProvisioningOutbox { status: PENDING }
+              5. Mark WebhookEvent { status: PROCESSED }
+              6. Publish PaymentSuccessEvent (non-critical: email, analytics)
+
+ProvisioningOutbox poller (every 30s)
+  └── PENDING jobs → SubscriptionService.createSubscription() / addSeats() / extendEndDate()
+        ├── Success → DONE + AuditLog
+        └── Failure → retryCount++, lastError, alert at maxRetries
+
+ReconciliationScheduler (every 15 min)
+  └── INITIATED orders older than 15 min, younger than 48 hr
+        └── provider.getPaymentOrderStatus()
+              └── On SUCCESS → same atomic write as webhook path
+```
 
 ---
 
-### 4.1 Data Layer — Entities
+## 5. Component Reference
 
-#### `Orders`
-The primary business record representing a customer order.
+### 5.1 Provider Layer
 
-| Field | Purpose |
+#### `IPaymentProvider` (interface)
+Every provider must implement this contract. Business logic calls the interface — never an SDK directly.
+
+```typescript
+interface IPaymentProvider {
+  readonly providerName: string;
+
+  // Initiation
+  createSession(dto: CreateSessionDto): Promise<SessionResult>;
+  createCheckoutSession(dto: CreateCheckoutSessionDto): Promise<CheckoutSessionResult>;
+
+  // Subscription lifecycle
+  createSubscription(dto: CreateSubscriptionDto): Promise<SubscriptionResult>;
+  cancelSubscription(providerSubId: string, atPeriodEnd?: boolean): Promise<CancelResult>;
+  renewSubscription(providerSubId: string, newProviderPmId?: string): Promise<RenewalResult>;
+
+  // Reconciliation
+  getPaymentOrderStatus(providerOrderId: string): Promise<PaymentStatusResult>;
+
+  // Webhook
+  verifyWebhook(dto: WebhookVerifyDto): Promise<WebhookEvent>;
+
+  // Refund (deferred)
+  refundPayment(dto: RefundDto): Promise<RefundResult>;
+}
+```
+
+**Normalised initiation response** — the frontend switches on `action`, never on `provider`:
+
+```typescript
+interface ProviderPayload {
+  provider:   'STRIPE' | 'CCAVENUE';
+  action:     'FORM_POST' | 'REDIRECT';
+  url:        string | null;
+  fields:     Record<string, string> | null;  // CCAvenue hidden-form fields
+  sessionId:  string | null;                  // Stripe checkout session ID
+}
+```
+
+---
+
+#### `StripeProvider` ✅ Implemented
+- `createSession` → Stripe PaymentIntent
+- `createCheckoutSession` → Stripe Checkout Session (returns `sessionId` + `paymentUrl`, action: `REDIRECT`)
+- `verifyWebhook` → reads `Stripe-Signature` header, HMAC-SHA256 verified **before** any JSON parsing
+- All other `IPaymentProvider` methods implemented
+
+---
+
+#### `CCavenueProvider` 🔲 To Build
+**Initiation side:**
+- Builds CCAvenue request params (merchantId, orderId, amount, currency, billing fields)
+- AES-CBC encryption of request → produces `encRequest`
+- Returns `{ action: 'FORM_POST', url: CCAvenue_endpoint, fields: { encRequest, access_code } }`
+
+**Callback side (inside `verifyWebhook`):**
+- AES-CBC decryption of `encResp` from raw body
+- If decryption fails → throw (trust boundary)
+- Extract `orderId`, `status`, `amount`, `currency` from decrypted payload
+- Amount handled as minor units (Long)
+- Return `PaymentWebhookResult`
+
+**Idempotency note:** CCAvenue has no eventId visible before decryption.  
+Strategy: `eventId = SHA-256(rawBody)` — deterministic fingerprint written to `WebhookEvent` before decryption. After decryption, `WebhookEvent.orderId` is updated with the real orderId.
+
+**Key storage:** Working key in env/Secrets Manager as `CCAVENUE_WORKING_KEY`. Never logged.
+
+---
+
+#### `PaymentProviderFactory` ✅ Implemented (partial)
+Routes by currency or explicit provider name. `isActive` check (from `PaymentProviderConfig`) runs at initiation — never at callback.
+
+Current currency map (extend when new providers are added):
+
+| Currency | Provider |
 |---|---|
-| `orderId` | Primary key (VARCHAR) |
-| `buyerId`, `companyId` | Who placed the order |
-| `orderStatus` | GSI-indexed — used for filtered queries across order lifecycle |
-| `totalPrice`, `wholesalePrice`, `walletBalancePrice` | Price breakdown — supports wallet partial payments |
-| `invoicePaid` | Boolean flag — has the invoice been marked settled |
-| `remainingAmount` | Tracks partial payment balance |
-| `paymentStatus` | Enum: `PAYMENT_PENDING`, `PAYMENT_DONE`, `PAYMENT_COMPLETED`, `PAYMENT_REJECTED`, `PAYMENT_REFUNDED` |
-| `paymentOrderId` | Foreign key → `PaymentOrders` — links business record to payment ledger |
-| `paymentRejectionDetails` | Stores provider rejection reason for dispute handling |
-
-**Why it matters:** Orders remain the business source of truth. The new design separates payment concerns into `PaymentOrders` rather than bloating this table.
+| USD, EUR, GBP | Stripe |
+| AED | CCAvenue |
+| INR | Razorpay *(placeholder — not yet registered)* |
 
 ---
 
-#### `PaymentOrders`
-The payment ledger — one record per payment attempt.
+### 5.2 Data Layer — Entities
+
+#### `PaymentOrders` (maps to current `Payment` entity — needs status enum alignment)
+
+| Field | Type | Purpose |
+|---|---|---|
+| `id` | UUID PK | Internal order ID — passed as idempotency key to provider |
+| `userId` | UUID FK | Owner |
+| `planId` | UUID FK | Plan purchased |
+| `subscriptionId` | UUID FK | Linked subscription (nullable until provisioned) |
+| `providerName` | string | `STRIPE` / `CCAVENUE` |
+| `providerOrderId` | string | Provider's own reference — used for reconciliation and refunds |
+| `amount` | bigint | Minor units (e.g. 19999 for 199.99 AED). Currency-aware: `Currency.getDefaultFractionDigits()` |
+| `currency` | char(3) | ISO-4217 |
+| `status` | enum | `PaymentOrderStatusEnum` — see below |
+| `orderContext` | enum | `SUBSCRIPTION` / `MARKETPLACE_ORDER` |
+| `paymentType` | enum | `ONE_TIME` / `SUBSCRIPTION` |
+| `couponCode` | string | Optional applied coupon |
+| `failureMessage` | string | Last failure reason |
+| `webhookEventId` | UUID FK | Linked `WebhookEvent` after processing |
+| `createdAt` | timestamptz | — |
+| `updatedAt` | timestamptz | — |
+
+**`PaymentOrderStatusEnum`:**
+
+```
+INITIATED     — order created, user sent to provider
+SUCCESS       — provider confirmed payment
+FAILED        — provider rejected payment
+NEEDS_REVIEW  — unrecognised provider status — flagged for manual investigation
+EXPIRED       — INITIATED record older than 30 min, eligible for fresh initiation
+```
+
+**Amount rule:** All amounts stored as `bigint` minor units. Conversion is currency-aware — `fractionDigits = Currency.getDefaultFractionDigits(currencyCode)`. Example: 199.99 AED → 19999 (×100), JPY 500 → 500 (×1).
+
+**Index:** Composite index on `(status, createdAt)` — required by `ReconciliationScheduler` to query stale `INITIATED` orders by age without full-table scan.
+
+---
+
+#### `ProvisioningOutbox` 🔲 To Build
+
+| Field | Type | Purpose |
+|---|---|---|
+| `jobId` | UUID PK | = `PaymentOrders.id` — prevents duplicate jobs at DB level |
+| `paymentOrderId` | UUID FK | → `PaymentOrders` |
+| `userId` | UUID | Owner |
+| `provisioningType` | enum | `SUBSCRIPTION_NEW` / `SUBSCRIPTION_ADDON` / `SUBSCRIPTION_RENEW` / `MARKETPLACE` |
+| `status` | enum | `PENDING` / `IN_PROGRESS` / `DONE` / `FAILED` |
+| `retryCount` | int | Auto-incremented on each failed attempt |
+| `maxRetries` | int | Configurable — default 3 |
+| `lastError` | text | Exception message from last failed attempt |
+| `processedAt` | timestamptz | When provisioning completed successfully |
+| `createdAt` | timestamptz | — |
+
+**Atomic write guarantee:** `PaymentOrders { SUCCESS }` and `ProvisioningOutbox { PENDING }` are written inside a single Postgres transaction. Both succeed or both fail — no partial state possible.
+
+```typescript
+// Inside PaymentCallbackService step 4:
+await this.dataSource.transaction(async (manager) => {
+  await manager.update(PaymentOrders, { id: orderId }, { status: 'SUCCESS' });
+  await manager.insert(ProvisioningOutbox, { jobId: orderId, status: 'PENDING', ... });
+});
+```
+
+---
+
+#### `PaymentProviderConfig` 🔲 To Build
+
+| Field | Type | Purpose |
+|---|---|---|
+| `provider` | enum PK | `STRIPE` / `CCAVENUE` |
+| `displayName` | string | UI label |
+| `isActive` | boolean | Toggle without deployment — checked at initiation |
+| `supportedCurrencies` | string[] | e.g. `['AED']` — used by factory for routing |
+| `supportedCountries` | string[] | Optional — country-level routing |
+| `updatedAt` | timestamptz | — |
+
+**Caching:** Non-secret fields (`isActive`, `supportedCurrencies`, `displayName`) cached in-process using a simple TTL map (or `node-cache`). Consistent with the existing coupon-config pattern. Secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `CCAVENUE_WORKING_KEY`) stay in env / Secrets Manager — never in this table.
+
+---
+
+#### `WebhookEvent` ✅ Implemented
 
 | Field | Purpose |
 |---|---|
 | `id` | UUID PK |
-| `orderId` | FK → Orders |
-| `subscriptionId` | FK → Subscription (for subscription payments) |
-| `companyId` | Tenant identifier |
-| `amount`, `currency` | What was charged |
-| `paymentOrderType` | Enum distinguishing Marketplace Order, Subscription, Marketplace Plan Order |
-| `status` | `PaymentOrderStatusEnum` — the lifecycle state |
-| `paymentProvider` | Which provider handled this (STRIPE, RAZORPAY, CCAVENUE) |
-| `paymentProviderOrderId` | Provider's own reference ID — used for reconciliation and refunds |
-| `provisioningStatus` | Tracks whether downstream provisioning has completed |
-| `retryCount` | Tracks automatic retry attempts |
-| `lastError` | Last failure reason — surfaced for ops tooling |
-| `processedAt` | When the payment was confirmed by the provider |
+| `providerEventId` | Idempotency anchor — unique per `(providerName, providerEventId)` |
+| `providerName` | `stripe` / `ccavenue` |
+| `type` | Provider event type string |
+| `rawPayload` | Full encrypted-at-rest payload (for replay/debugging) |
+| `status` | `PENDING` / `PROCESSED` / `FAILED` / `IGNORED` |
+| `retryCount` | — |
+| `lastError` | — |
+| `processedAt` | — |
 
-**Why it matters:** Every payment attempt is its own record. Retries create a traceable history. Refunds reference the original `paymentProviderOrderId`. Reconciliation can query by `status` without scanning `Orders`.
+**Crash recovery:** If status is `PENDING` or `FAILED` on a re-delivered event, re-run processing. If `PROCESSED`, stop — already done.
 
 ---
 
-#### `Subscription`
-Tracks active subscription state per company.
+#### `AuditLog` ✅ Implemented
+Append-only — every state change writes a record. Actions: `PAYMENT_INITIATED`, `PAYMENT_SUCCESS`, `PAYMENT_FAILED`, `TAMPER_DETECTED`, `PROVISIONING_COMPLETE`, `RECONCILIATION_RESOLVED`, `WEBHOOK_DUPLICATE`, `PROVIDER_DISABLED`.
 
-| Field | Purpose |
+**PII policy:** Only non-PII identifiers stored — `orderId`, `userId`, `status`, `action`. No email, phone, billing address, card metadata.
+
+---
+
+#### `Subscription` ✅ Implemented
+#### `Plan` ✅ Implemented
+#### `User` ✅ Implemented
+
+---
+
+### 5.3 Service Layer
+
+#### `PaymentService` ✅ Implemented (needs `/payment/initiate` alignment)
+Coordinates initiation: validates request → delegates `PaymentOrders` creation to `SubscriptionService` → calls factory → returns `ProviderPayload` envelope.
+
+#### `PaymentCallbackService` 🔲 To Build — 6-Step Pipeline
+
+All provider webhooks run through the same 6 steps:
+
+```
+Step 1 — Idempotency check
+  Stripe:    eventId = event.id (evt_...)
+             INSERT WebhookEvent { eventId }
+             ON CONFLICT → check status → PROCESSED? stop. PENDING/FAILED? re-run.
+  CCAvenue:  eventId = SHA-256(rawBody)   ← fingerprint (orderId unknown before decryption)
+             INSERT WebhookEvent { eventId }
+             After decryption → UPDATE WebhookEvent { orderId }
+
+Step 2 — Provider validation (inside provider.verifyWebhook)
+  Stripe:    Read Stripe-Signature header
+             HMAC-SHA256 verify against raw bytes BEFORE JSON parse
+             Reject if invalid
+  CCAvenue:  AES-CBC decrypt encResp using Working Key
+             Reject if decryption fails
+             Extract orderId, status, amount, currency
+
+Step 3 — Amount tamper check
+  webhookAmount (minor units) === PaymentOrders.amount (exact integer)
+  Mismatch → AuditLog { TAMPER_DETECTED } → reject
+
+Step 4 — Atomic Postgres transaction (SUCCESS path)
+  BEGIN;
+    UPDATE PaymentOrders SET status = 'SUCCESS' WHERE id = orderId AND status = 'INITIATED';
+    INSERT INTO ProvisioningOutbox (jobId, ...) VALUES (orderId, 'PENDING', ...)
+      ON CONFLICT (jobId) DO NOTHING;
+  COMMIT;
+  On FAILED path: UPDATE PaymentOrders { FAILED } + AuditLog only
+
+Step 5 — Mark webhook processed
+  UPDATE WebhookEvent SET status = 'PROCESSED'
+
+Step 6 — Publish PaymentSuccessEvent (async, non-critical)
+  → ReceiptEmailListener  (send receipt email)
+  → AnalyticsListener     (push event to analytics)
+  Provisioning is NOT triggered here — guaranteed by outbox row in Step 4
+```
+
+#### `SubscriptionService` ✅ Implemented (needs `createPaymentOrder` method)
+
+#### `ProvisioningOutboxPoller` 🔲 To Build
+- Runs every 30 seconds (`@Cron`)
+- Advisory lock (`SELECT pg_try_advisory_lock(key)`) — only one instance in multi-node deployment
+- Per-job `try/catch` — one job failure does not abort the batch
+
+```
+For each PENDING job:
+  SUBSCRIPTION_NEW   → SubscriptionService.createSubscription()
+  SUBSCRIPTION_ADDON → SubscriptionService.addSeats()
+  SUBSCRIPTION_RENEW → SubscriptionService.extendEndDate()
+  MARKETPLACE        → declared, implementation deferred
+
+  Success → status = DONE, AuditLog { PROVISIONING_COMPLETE }
+  Failure → retryCount++, lastError = exception.message
+             if retryCount >= maxRetries → status = FAILED, alert raised
+```
+
+#### `ReconciliationScheduler` 🔲 To Build
+- Runs every 15 minutes (`@Cron`)
+- Advisory lock — only one instance at a time
+- Queries `PaymentOrders` where `status = INITIATED AND createdAt < NOW() - 15min AND createdAt > NOW() - 48hr`
+- For each: calls `provider.getPaymentOrderStatus(providerOrderId)`
+- On `SUCCESS` → same atomic Postgres transaction as webhook Step 4
+- On null/unknown → skip, leave as-is
+- Each order wrapped in `try/catch` — provider outage does not abort batch
+
+---
+
+### 5.4 Controller Layer
+
+#### `PaymentController` — `POST /payment/initiate` [JWT] 🔲 Needs alignment
+Current `POST /payments` exists but needs to match the TDD's unified initiation endpoint with normalised `ProviderPayload` response.
+
+**Request:**
+```typescript
+{
+  planId:          string;   // required
+  currency:        string;   // required — AED | USD
+  paymentType:     string;   // ONE_TIME | SUBSCRIPTION
+  couponCode?:     string;
+  // Billing fields — required for CCAvenue, optional for Stripe
+  billingName?:    string;
+  billingAddress?: string;
+  billingCity?:    string;
+  billingState?:   string;
+  billingZip?:     string;
+  billingCountry?: string;
+  billingTel?:     string;
+  billingEmail?:   string;
+}
+```
+
+**Response:**
+```typescript
+{
+  provider:   'STRIPE' | 'CCAVENUE';
+  action:     'FORM_POST' | 'REDIRECT';
+  url:        string | null;
+  fields:     Record<string, string> | null;
+  sessionId:  string | null;
+}
+```
+
+#### `WebhookController` ✅ Implemented
+- `POST /webhook/stripe` [PUBLIC] — passes `rawBody` + `stripe-signature` header
+- `POST /webhook/ccavenue` [PUBLIC] — passes `rawBody` (encrypted `encResp`)
+- `POST /webhook/:provider` [PUBLIC] — generic fallback
+
+**Raw body capture:** `rawBody` must be captured as `Buffer` before any JSON parsing. Requires `express.raw()` middleware on webhook routes, not `express.json()`.
+
+#### `SubscriptionController` ✅ Implemented
+
+---
+
+## 6. Webhook Processing — Edge Cases
+
+| Scenario | Handling |
 |---|---|
-| `id` | UUID PK |
-| `userId`, `companyId` | Owner — `companyId` is GSI-indexed for fast tenant lookup |
-| `planId` | FK → `SubscriptionPlans` |
-| `status` | `subscriptionStatusEnum`: `ACTIVE`, `TRIALING`, `CANCELLED`, `EXPIRED` |
-| `currentPeriodStart`, `currentPeriodEnd` | Billing window |
-| `trialEnd` | Trial period boundary |
-| `cancelAtPeriodEnd` | Graceful cancel flag — does not immediately revoke access |
-| `paymentProvider` | Which provider manages this subscription |
-| `providerSubscriptionId` | Provider's own subscription ID (Stripe `sub_xxx`) |
-| `canceledAt` | Timestamp of cancellation |
-
-**Why it matters:** Decoupled from `Orders` — subscription lifecycle is independent from marketplace order lifecycle.
+| Duplicate webhook | `WebhookEvent` unique insert fails → check status → PROCESSED: stop / PENDING or FAILED: re-run |
+| CCAvenue no eventId before decryption | `SHA-256(rawBody)` fingerprint as idempotency anchor, updated with orderId post-decryption |
+| Invalid signature | Rejected in Step 2 before touching `PaymentOrders`. No `AuditLog`. |
+| Amount tamper | Rejected in Step 3. `AuditLog { TAMPER_DETECTED }`. No state change. |
+| Unknown `orderId` | Rejected. `AuditLog` row written. No state change. |
+| Already SUCCESS/FAILED order | `WebhookEvent` stored but no state change — idempotent by design. |
+| Server restart between SUCCESS write and outbox write | Postgres transaction ensures both are written atomically. Webhook redelivery re-runs safely. |
+| Provider disabled mid-session | `isActive` check applies at initiation only — not at callback. Webhook processed normally. |
+| Non-standard status from provider | Normalised to `NEEDS_REVIEW`. Raw value logged in `AuditLog.metadata`. |
 
 ---
 
-#### `SubscriptionPlans`
-The plan catalogue.
+## 7. Provisioning — Edge Cases
 
-| Field | Purpose |
+| Scenario | Handling |
 |---|---|
-| `planId` | PK |
-| `name`, `description` | Display fields |
-| `price` | DECIMAL — base price |
-| `interval`, `intervalCount` | Billing frequency (e.g., monthly, 1) |
-| `trialPeriodDays` | Free trial window |
-| `isActive` | Soft toggle — disable plans without deleting them |
-| `providerPlanId` | Provider's plan/price ID (e.g., Stripe `price_xxx`) |
-| `marketplace` | Whether this plan is tied to marketplace access |
+| Provisioning fails after SUCCESS | `PaymentOrders.status` stays `SUCCESS` — never rolled back. Outbox retries up to `maxRetries`. |
+| `createSubscription` throws | Caught per-job. `retryCount++`, `lastError` updated. Other jobs unaffected. |
+| Duplicate provisioning job | `jobId = PaymentOrders.id` PK — second insert fails at DB level. |
+| Server crash mid-provisioning | Job stays `PENDING`. Next poller run picks it up — at-least-once delivery guaranteed. |
+| `createSubscription` runs twice (at-least-once retry) | `subscriptionId` FK check prevents duplicate subscription creation. |
 
 ---
 
-#### `AuditLog`
-Immutable event ledger — every state change in the system writes a record here.
+## 8. Reconciliation — Edge Cases
 
-| Field | Purpose |
+| Scenario | Handling |
 |---|---|
-| `id` | UUID PK |
-| `entity_type` | GSI — `EntityTypeEnum`: Order or Subscription |
-| `entity_id` | GSI — the orderId or subscriptionId being changed |
-| `companyId` | Tenant |
-| `actorType` | `SYSTEM`, `USER`, `ADMIN` |
-| `actorId` | Who triggered the change |
-| `action` | `actionTypeEnum` — what happened (PAYMENT_SUCCESS, REFUND_INITIATED, etc.) |
-| `previousStatus`, `newStatus` | State before and after — can be null for creation events |
-| `metadata` | Free JSON — provider response, amount, reason |
-| `createdAt` | Immutable timestamp |
-
-**Why it matters:** Single source of truth for payment disputes, refund decisions, and compliance. No manual table-tracing needed.
+| Webhook never arrived | Reconciler finds `INITIATED` order after 15 min, calls `getPaymentOrderStatus()`, heals via atomic write |
+| Order too old (>48 hr) | Skipped — providers typically expire orders by then; manual review |
+| Provider returns null status | Order left in current state — reconciler never overwrites with unknown |
+| Multiple instances running | Postgres advisory lock (`pg_try_advisory_lock`) — only one instance runs per 15-min window |
+| Provider API down | Per-order `try/catch` — failed orders logged, batch continues |
 
 ---
 
-#### `ProvisioningOutbox`
-Reliability pattern — guarantees downstream provisioning completes even if the system crashes after a payment success.
+## 9. Security
 
-| Field | Purpose |
+| Concern | Implementation |
 |---|---|
-| `jobId` | UUID PK — maps to `PaymentOrders.orderId` |
-| `orderId` | FK → `PaymentOrders` |
-| `status` | `ProvisioningStatusEnum`: `PENDING`, `IN_PROGRESS`, `DONE`, `FAILED` |
-| `paymentType` | What needs to be provisioned |
-| `retryCount` | Auto-incremented on each failed attempt |
-| `lastError` | Last failure reason |
-| `processedAt` | When provisioning completed successfully |
-| `TTL` | Epoch seconds — record auto-expires after completion |
-
-**Why it matters:** This is the most critical reliability mechanism. The flow is:
-1. Payment succeeds → write `ProvisioningOutbox` record atomically in the same transaction.
-2. A background poller runs every 30 seconds, picks up `PENDING` records, and calls `SubscriptionService.addMarketplaceAddOns()`.
-3. On success → marks `DONE`. On failure → increments `retryCount`, marks `FAILED`, retries on next poll.
-4. The customer is **always provisioned** even if the service crashes between payment confirmation and provisioning.
+| Stripe webhook trust | HMAC-SHA256 via `Stripe-Signature` header, raw bytes, before JSON parse |
+| CCAvenue webhook trust | AES-CBC decryption success = trust boundary |
+| Provider idempotency | `PaymentOrders.id` passed as idempotency key to provider — network timeout + retry returns original, no duplicate charge |
+| Secrets | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `CCAVENUE_WORKING_KEY`, `CCAVENUE_MERCHANT_ID`, `CCAVENUE_ACCESS_CODE` in env / Secrets Manager only — never in DB, never logged |
+| PII in webhook payload | `WebhookEvent.rawPayload` encrypted at rest (AES) before DynamoDB/PG storage |
+| PII in logs | `LogSanitizerUtil` — email, phone, billing address, card metadata excluded from all logs |
+| Webhook endpoint public | Signature validation is the only trust boundary — no JWT on webhook routes |
 
 ---
 
-#### `WalletTransactions`
-Ledger of all wallet money movements per company.
-
-| Field | Purpose |
-|---|---|
-| `id` | UUID PK |
-| `orderId` | Which order triggered this movement |
-| `companyId` | Tenant |
-| `amount`, `currency` | Movement value |
-| `type` | `walletTransactionTypeEnum`: `CREDIT` (top-up, refund) or `DEBIT` (applied to order) |
-| `auditId` | Links to `AuditLog` record |
-
----
-
-#### `WalletTopupRequests`
-Approval workflow for manually adding funds to a company wallet.
-
-| Field | Purpose |
-|---|---|
-| `orderId` | Reference |
-| `amount`, `currency` | Requested top-up value |
-| `status` | `walletTopupStatusEnum`: `proposed`, `PROCESSED`, `denied`, `CLOSED` |
-| `requestedBy`, `approvedBy` | Dual-control — who asked, who approved |
-| `approvalNote` | Free text for ops audit |
-| `processedAt` | When funds were actually applied |
-
----
-
-#### `PaymentProviderConfig`
-Runtime configuration per payment provider — avoids hardcoded secrets in code.
-
-| Field | Purpose |
-|---|---|
-| `provider` | STRIPE, RAZORPAY, CCAVENUE |
-| `apiKey` | Encrypted at rest |
-| `supportedCurrencies` | e.g., `[MAC_USD]` — used by factory for routing |
-| `webhookSecret` | Used for signature verification on incoming webhooks |
-| `isActive` | Toggle providers on/off without deployment |
-
----
-
-#### `WebhookEvent`
-Idempotent log of every inbound webhook from a payment provider.
-
-| Field | Purpose |
-|---|---|
-| `id` | Provider's event ID — used as idempotency key |
-| `paymentProvider` | Which provider sent it |
-| `eventType` | `webhookEventTypeEnum` |
-| `payload` | Full raw payload stored for replay |
-| `status` | Processing state |
-| `processedAt` | When it was handled |
-
-**Why it matters:** The handler checks if `id` already exists before processing. Duplicate webhooks (Stripe retries on 5xx) are silently discarded. The raw payload enables event replay for debugging.
-
----
-
-### 4.2 Provider Layer
-
-#### `IPaymentProvider` Interface
-The contract every payment provider must implement:
-
-```
-+ createSessionOrder(orderId, amount, currency, description)
-+ markOrderAsPaid(orderId, providerId, providerOrderId, status)
-+ getSessionOrderStatus()           — polls provider for final status
-+ getSubscriptionById()             — fetch subscription state from provider
-+ cancelSubscription(subscriptionId)
-+ renewSubscription(subscriptionId)
-```
-
-**Why it matters:** Business logic calls the interface, not a specific SDK. Swapping Stripe for Razorpay for a specific country requires zero changes to service code.
-
----
-
-#### `StripeProvider`
-Implements `IPaymentProvider` using the Stripe Node SDK. Handles Stripe Checkout Sessions, Stripe Subscriptions, and Stripe refund APIs.
-
-#### `RazorPayProvider`
-Implements `IPaymentProvider` using the Razorpay SDK. Intended for INR payments and Indian market.
-
-#### `CCavenueProvider`
-Implements `IPaymentProvider`. CCAvenue is a popular Indian payment gateway with its own redirect-based flow.
-
----
-
-#### `PaymentProviderFactory`
-Routes payment requests to the correct provider implementation.
-
-```
-+ getProvider(type: PaymentProviderTypeEnum): IPaymentProvider
-+ getProviderForCountry(country, currency): IPaymentProvider
-```
-
-**Why it matters:** Country/currency-based routing means a company in India automatically uses Razorpay while a US company uses Stripe — without any application logic change.
-
----
-
-### 4.3 Controller Layer
-
-#### `PaymentController`
-```
-POST /payment/initiate   [AUTHENTICATED]
-```
-Entry point for all payment initiations — marketplace orders and subscription payments. Validates the request, creates a `PaymentOrders` record, delegates to `PaymentService`.
-
-#### `SubscriptionController`
-```
-GET    /subscriptions          — list active subscription for the company
-GET    /subscriptions/{planId} — get plan details
-DELETE /subscriptions/{plan}   — cancel subscription
-```
-
-#### `WebhookController`
-```
-POST /webhook/stripe
-POST /webhook/razorpay
-POST /webhook/[ccavenue]
-```
-Receives provider callbacks. Verifies signature, writes a `WebhookEvent` record, delegates to `PaymentCallbackService`. No business logic lives here.
-
-#### `ReconciliationController`
-```
-+ reconcile()   — runs every 15 minutes
-```
-Queries `PaymentOrders` where status is `INITIATED` or `PROCESSING` and the `processedAt` is older than a threshold. For each, calls `getSessionOrderStatus()` on the provider and heals the state. Handles missed webhooks (e.g., server was down).
-
----
-
-### 4.4 Service Layer
-
-#### `PaymentService`
-```
-+ initiatePaymentOrder()   — creates PaymentOrders record, calls provider.createSessionOrder()
-+ updatePaymentOrder()     — updates status, writes AuditLog
-+ processPayment()         — top-level orchestrator
-```
-
-#### `PaymentCallbackService`
-Called by `WebhookController` after signature verification.
-```
-+ handleCallback(provider, orderId, signature)
-+ verifySignature()       — delegates to provider-specific verification
-+ updateStatus()          — updates PaymentOrders status
-+ emitEvent()             — publishes PaymentSuccessEvent
-```
-After emitting the event, three async listeners run:
-- `SubscriptionProvisioningListener` → writes to `ProvisioningOutbox`
-- `ReceiptMailListener` → sends payment confirmation email
-- `AnalyticsListener` → pushes event to analytics pipeline
-
-#### `SubscriptionService`
-```
-+ createOrUpdateSubscription(companyId, planId)
-+ cancelSubscription()
-+ getActiveSubscription()
-+ renewSubscription()
-+ getActivePlanDetails()
-+ handleSubscriptionRefund()
-```
-
----
-
-### 4.5 Event-Driven Layer
-
-#### `PaymentSuccessEvent`
-Published by `PaymentCallbackService` after a confirmed payment. Decouples the payment confirmation from downstream side-effects. Each listener is independent — a mail failure does not roll back provisioning.
-
-#### `SubscriptionProvisioningListener`
-Receives `PaymentSuccessEvent` and writes a `ProvisioningOutbox` record. The actual provisioning is then handled by the outbox poller — not inline.
-
-#### `ReceiptMailListener`
-Sends the payment receipt email to the company.
-
-#### `AnalyticsListener`
-Pushes payment data to the analytics system (revenue tracking, cohort analysis).
-
----
-
-## 5. Enum Reference
+## 10. Enum Reference
 
 | Enum | Values |
 |---|---|
-| `subscriptionStatusEnum` | ACTIVE, TRIALING, CANCELLED, EXPIRED |
-| `paymentOrderTypeEnum` | SUBSCRIPTION, SUBSCRIPTION_MARKETPLACE, MARKETPLACE_ORDER, MARKETPLACE_PLAN_ORDER |
-| `walletTopupStatusEnum` | proposed, PROCESSED, denied, CLOSED |
-| `walletTransactionTypeEnum` | CREDIT, DEBIT |
-| `paymentMethodEnum` | OWN_TIME, RAZORPAY, STRIPE, CCAVENUE |
-| `orderTypeEnum` | order, ADMIN, AGENT, MARKETING |
-| `actionTypeEnum` | PAYMENT_SUCCESS, PAYMENT_FAILED, PAYMENT_INITIATED, REFUND_PAYMENT, REFUND_INITIATED, APPROVED, ADMIN_ADDED, EXPIRED, PENDING, SUBSCRIPTION_CREATED, PAYMENT_CANCELLED |
-| `webhookEventTypeEnum` | PAYMENT_SUCCESS, PAYMENT_FAILED, PAYMENT_INITIATED, SUBSCRIPTION_RENEWED, SUBSCRIPTION_CANCELLED |
-| `walletTransactionStatusEnum` | PENDING, FAILED, SUBMITTED, REVERSED |
-| `orderStatusEnum` | CREATED, ORDER_IN_PROGRESS, SYNC_COMPLETED, MAIN_JOB_DELIVERY, APPROVED, CANCELLED |
-| `orderPaymentStatusEnum` | PAYMENT_PENDING, PAYMENT_DONE, PAYMENT_COMPLETED, PAYMENT_REJECTED, PAYMENT_REFUNDED |
-| `provisioningStatusEnum` | PENDING, IN_PROGRESS, DONE, FAILED |
-| `paymentProviderTypeEnum` | STRIPE, RAZORPAY, CCAVENUE |
+| `PaymentOrderStatusEnum` | `INITIATED`, `SUCCESS`, `FAILED`, `NEEDS_REVIEW`, `EXPIRED` |
+| `PaymentOrderContextEnum` | `SUBSCRIPTION`, `MARKETPLACE_ORDER` |
+| `PaymentTypeEnum` | `ONE_TIME`, `SUBSCRIPTION` |
+| `ProvisioningTypeEnum` | `SUBSCRIPTION_NEW`, `SUBSCRIPTION_ADDON`, `SUBSCRIPTION_RENEW`, `MARKETPLACE` |
+| `ProvisioningStatusEnum` | `PENDING`, `IN_PROGRESS`, `DONE`, `FAILED` |
+| `WebhookStatusEnum` | `PENDING`, `PROCESSED`, `FAILED`, `IGNORED` |
+| `PaymentProviderEnum` | `STRIPE`, `CCAVENUE` *(RAZORPAY placeholder for future)* |
+| `AuditActionEnum` | `PAYMENT_INITIATED`, `PAYMENT_SUCCESS`, `PAYMENT_FAILED`, `TAMPER_DETECTED`, `PROVISIONING_COMPLETE`, `RECONCILIATION_RESOLVED`, `WEBHOOK_DUPLICATE`, `PROVIDER_DISABLED` |
+| `SubscriptionStatusEnum` | `TRIALING`, `ACTIVE`, `PAST_DUE`, `CANCELED`, `UNPAID`, `INCOMPLETE`, `INCOMPLETE_EXPIRED`, `PAUSED` |
 
 ---
 
-## 6. End-to-End Payment Flow
+## 11. Implementation Status
 
-```
-1. Frontend calls POST /payment/initiate
-2. PaymentController → PaymentService.initiatePaymentOrder()
-3. PaymentService creates PaymentOrders record (status: INITIATED)
-4. PaymentProviderFactory.getProvider() → correct provider
-5. Provider.createSessionOrder() → returns checkout URL/session
-6. Frontend redirects user to provider checkout
-7. User completes payment → Provider sends webhook
-8. WebhookController receives webhook
-   ├── Verify signature (PaymentCallbackService.verifySignature)
-   ├── Write WebhookEvent record (idempotency check)
-   └── PaymentCallbackService.handleCallback()
-       ├── Update PaymentOrders → status: COMPLETED
-       ├── Write AuditLog record
-       └── Emit PaymentSuccessEvent
-           ├── SubscriptionProvisioningListener → write ProvisioningOutbox
-           ├── ReceiptMailListener → send email
-           └── AnalyticsListener → push to analytics
-
-9. ProvisioningOutbox poller (every 30s)
-   └── Picks PENDING jobs → calls SubscriptionService.addMarketplaceAddOns()
-       ├── Success → mark DONE
-       └── Failure → increment retryCount, mark FAILED, retry next poll
-
-10. ReconciliationController (every 15m)
-    └── Finds stale INITIATED orders → calls provider.getSessionOrderStatus() → heals state
-```
-
----
-
-## 7. Key Design Decisions and Trade-offs
-
-### Decision 1: Outbox Pattern for Provisioning
-**Why:** Eliminates the "charged but not provisioned" data corruption scenario.  
-**Trade-off:** Provisioning is eventually consistent — there is up to a 30-second delay between payment confirmation and feature activation. This is acceptable for the business.
-
-### Decision 2: Provider Abstraction via Interface
-**Why:** Multi-market support (India vs global) without code duplication.  
-**Trade-off:** Each new provider requires implementing the full `IPaymentProvider` contract — adds initial development overhead but saves long-term maintenance.
-
-### Decision 3: Webhook Idempotency via WebhookEvent Table
-**Why:** Payment providers retry webhooks on failure — without idempotency a customer could be double-charged or double-provisioned.  
-**Trade-off:** Adds a DB write on every webhook, but this is necessary for correctness.
-
-### Decision 4: Event-Driven Post-Payment Side Effects
-**Why:** Decouples mail, analytics, and provisioning from the payment critical path. A broken mail server does not fail a payment.  
-**Trade-off:** Harder to trace failures end-to-end — requires event bus monitoring.
-
-### Decision 5: Reconciliation Scheduler
-**Why:** Webhooks can be missed (server downtime, network issues). Reconciliation ensures eventual consistency without manual ops intervention.  
-**Trade-off:** 15-minute window means a missed webhook can leave a payment in limbo for up to 15 minutes. Acceptable given the low frequency of missed webhooks.
-
----
-
-## 8. What Is Not Yet Built (Gaps from LLD)
-
-Based on the diagram, the following components are designed but not yet fully implemented in the codebase:
-
-| Component | Status | Notes |
+| Component | Status | Location |
 |---|---|---|
-| `RazorPayProvider` | Designed, not implemented | Only `StripeProvider` exists in `/src/payment-provider/providers/` |
-| `CCavenueProvider` | Designed, not implemented | Not in codebase |
-| `ReconciliationController` | Designed, not implemented | No reconciliation service found in codebase |
-| `ProvisioningOutbox` | Designed, not implemented | No outbox entity or poller in codebase |
-| `WalletTransactions` | Designed, not implemented | No wallet module in current codebase |
-| `WalletTopupRequests` | Designed, not implemented | No wallet module in current codebase |
-| `PaymentProviderConfig` | Designed, not implemented | Config is currently static |
-| `AnalyticsListener` | Designed, not implemented | |
-| `ReceiptMailListener` | Designed, not implemented | |
-
-**Current codebase implements:** Stripe-only payment, subscription management, plan management, audit log, and webhook handling for Stripe.
+| `IPaymentProvider` interface | ✅ Done | `src/payment-provider/interfaces/` |
+| `StripeProvider` | ✅ Done | `src/payment-provider/providers/stripe.provider.ts` |
+| `PaymentProviderFactory` (registry + currency routing) | ✅ Done | `src/payment-provider/payment-provider.factory.ts` |
+| `Payment` entity (→ `PaymentOrders`) | ✅ Done (needs status enum alignment) | `src/payment/payment.entity.ts` |
+| `Subscription` entity + service + controller | ✅ Done | `src/subscription/` |
+| `Plan` entity | ✅ Done | `src/plan/plan.entity.ts` |
+| `WebhookEvent` entity (dedup index) | ✅ Done | `src/webhook-event/webhook-event.entity.ts` |
+| `WebhookController` (`/webhook/stripe`, `/:provider`) | ✅ Done | `src/webhook-event/webhook.controller.ts` |
+| `WebhookHandlerFactory` | ✅ Done | `src/webhook-event/webhook-handler.factory.ts` |
+| `StripeEventHandler` | ✅ Done | `src/webhook-event/handlers/stripe-event.handler.ts` |
+| `AuditLog` entity | ✅ Done | `src/audit-log/audit-log.entity.ts` |
+| `CCavenueProvider` | 🔲 To Build | `src/payment-provider/providers/ccavenue.provider.ts` |
+| `ProvisioningOutbox` entity + poller | 🔲 To Build | `src/provisioning-outbox/` |
+| `PaymentCallbackService` (6-step pipeline) | 🔲 To Build | `src/webhook-event/payment-callback.service.ts` |
+| `ReconciliationScheduler` | 🔲 To Build | `src/reconciliation/` |
+| `PaymentProviderConfig` entity (cached) | 🔲 To Build | `src/payment-provider/payment-provider-config.entity.ts` |
+| `POST /payment/initiate` unified endpoint | 🔲 To Build | `src/payment/payment.controller.ts` |
+| Normalised `ProviderPayload` response envelope | 🔲 To Build | `src/payment-provider/dto/` |
+| `ReceiptEmailListener` | 🔲 To Build | `src/events/` |
+| `AnalyticsListener` | 🔲 To Build | `src/events/` |
+| `RazorpayProvider` | 🔲 Deferred (future release) | — |
+| Marketplace order payment implementation | 🔲 Deferred (future release) | — |
+| Refund flows | 🔲 Deferred | — |
 
 ---
 
-## 9. Recommended Next Steps
+## 12. Build Priority Order
 
-1. **Implement `ProvisioningOutbox`** — highest priority. Eliminates the biggest reliability risk.
-2. **Implement `ReconciliationController`** — second highest. Handles missed webhooks without manual ops.
-3. **Add `WalletTransactions` module** — enables wallet-based partial payments.
-4. **Implement `RazorPayProvider`** — required for India market.
-5. **Migrate `PaymentProviderConfig` to DB** — allows ops to rotate keys and toggle providers without deployment.
-6. **Wire `ReceiptMailListener` and `AnalyticsListener`** — complete the event-driven pipeline.
+1. **`PaymentOrderStatusEnum` alignment** — align existing `Payment` entity status enum to `INITIATED / SUCCESS / FAILED / NEEDS_REVIEW / EXPIRED`
+2. **`ProvisioningOutbox` entity + poller** — highest reliability risk eliminated here
+3. **`CCavenueProvider`** — AES-CBC + SHA-256 fingerprint idempotency
+4. **`PaymentCallbackService` (6-step pipeline)** — replaces inline webhook handling
+5. **`POST /payment/initiate` + `ProviderPayload` envelope** — unified initiation for both providers
+6. **`ReconciliationScheduler`** — heals missed webhooks
+7. **`PaymentProviderConfig` entity + cache** — runtime provider toggle without deployment
+8. **`ReceiptEmailListener` + `AnalyticsListener`** — complete event-driven pipeline
+
+---
+
+## 13. Open Questions
+
+1. Should the reconciliation window be 15 min or 30 min for Stripe? Stripe webhooks are more reliable — longer window reduces unnecessary provider API calls.
+2. Should `ProvisioningOutbox.maxRetries` be global config or per `provisioningType`? Default 3 assumed.
+3. Should `AuditLog` TTL be 365 days or longer? Some regions require payment records for 5–7 years — compliance sign-off needed.
+4. `SubscriptionPlans.amount` — stored as whole currency (199.99) or minor units (19999)? Same rule must apply consistently across plan → `PaymentOrders` → provider.
+5. CCAvenue eventId strategy — SHA-256 fingerprint of `encResp` as idempotency anchor. Needs confirmation that CCAvenue never sends a different `encResp` for the same payment event.
 
 ---
 
