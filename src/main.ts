@@ -21,7 +21,11 @@ async function bootstrap() {
     .setTitle('Stripe Node API')
     .setDescription('REST API documentation')
     .setVersion('1.0')
+    .addBearerAuth()
+    .addTag('auth')
     .addTag('users')
+    .addTag('payments')
+    .addTag('subscriptions')
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);
