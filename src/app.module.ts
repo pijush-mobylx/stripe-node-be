@@ -14,6 +14,7 @@ import { PaymentProviderModule } from './payment-provider/payment-provider.modul
 import { AuthModule } from './auth/auth.module';
 import { ProvisioningOutboxModule } from './provisioning-outbox/provisioning-outbox.module';
 import { PaymentCallbackModule } from './payment-callback/payment-callback.module';
+import { ReconciliationModule } from './reconciliation/reconciliation.module';
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { PaymentCallbackModule } from './payment-callback/payment-callback.modul
     AuthModule,
     ProvisioningOutboxModule,
     PaymentCallbackModule,
+    ReconciliationModule,
   ],
 })
 export class AppModule {}
