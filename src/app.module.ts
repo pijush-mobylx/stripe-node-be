@@ -36,7 +36,7 @@ import { ReconciliationModule } from './reconciliation/reconciliation.module';
         database: config.get<string>('DB_NAME', 'stripe_node_db'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
         synchronize: true,
-        logging: true,
+        logging: false,
       }),
     }),
     UserModule,

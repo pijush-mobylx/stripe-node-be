@@ -5,6 +5,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  RawBodyRequest,
   Req,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -21,17 +22,16 @@ export class WebhookController {
   @ApiOperation({ summary: 'Stripe webhook receiver' })
   @ApiResponse({ status: 200, schema: { example: { received: true } } })
   handleStripe(
-    @Req() req: Request,
+    @Req() req: RawBodyRequest<Request>,
     @Headers('stripe-signature') signature: string,
   ): Promise<{ received: boolean }> {
     return this.webhookHandlerFactory.processWebhook(
       'stripe',
-      req.body as Buffer,
+      req.rawBody,
       signature,
     );
   }
 
-  // Generic route — ready for RazorPay / Paytm when added
   @Post(':provider')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Generic webhook receiver — routes by provider name' })
@@ -39,12 +39,12 @@ export class WebhookController {
   @ApiResponse({ status: 200, schema: { example: { received: true } } })
   handleProvider(
     @Param('provider') provider: string,
-    @Req() req: Request,
+    @Req() req: RawBodyRequest<Request>,
     @Headers('x-webhook-signature') signature: string,
   ): Promise<{ received: boolean }> {
     return this.webhookHandlerFactory.processWebhook(
       provider,
-      req.body as Buffer,
+      req.rawBody,
       signature,
     );
   }
