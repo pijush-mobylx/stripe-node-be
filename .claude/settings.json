@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -X POST http://localhost:3000/payments/initiate -H 'Content-Type: application/json' -H 'Authorization: Bearer test' -d '{\"planId\":\"6650a1b2c3d4e5f6a7b8c9d0\",\"paymentType\":\"ONE_TIME\",\"successUrl\":\"http://localhost:3001/success\",\"cancelUrl\":\"http://localhost:3001/cancel\"}')"
+    ]
+  }
+}

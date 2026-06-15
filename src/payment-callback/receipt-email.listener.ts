@@ -1,35 +1,33 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { PAYMENT_SUCCESS_EVENT, PaymentSuccessEvent } from './payment-success.event';
-import { User } from '../user/user.entity';
+import { User, UserDocument } from '../user/user.schema';
 
 @Injectable()
 export class ReceiptEmailListener {
   private readonly logger = new Logger(ReceiptEmailListener.name);
 
   constructor(
-    @InjectRepository(User)
-    private readonly userRepo: Repository<User>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
   ) {}
 
   @OnEvent(PAYMENT_SUCCESS_EVENT, { async: true })
   async handlePaymentSuccess(event: PaymentSuccessEvent): Promise<void> {
     try {
-      const user = await this.userRepo.findOne({ where: { id: event.userId } });
+      const user = await this.userModel.findById(event.userId).exec();
       if (!user) {
         this.logger.warn(`ReceiptEmailListener: user ${event.userId} not found`);
         return;
       }
 
-      // TODO: replace with real mailer (e.g. SendGrid, SES) when email service is wired
+      // TODO: replace with real mailer (e.g. SendGrid, SES)
       this.logger.log(
         `[RECEIPT] To: ${user.email} | Payment: ${event.paymentId} | ` +
         `Amount: ${event.amount} | Provider: ${event.providerName}`,
       );
     } catch (err) {
-      // Listener failures must never crash the main pipeline — log and swallow
       this.logger.error(
         `ReceiptEmailListener failed for payment ${event.paymentId}: ${(err as Error).message}`,
       );

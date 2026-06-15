@@ -1,19 +1,14 @@
-import {
-  BadRequestException,
-  Injectable,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 
-import { Subscription, SubscriptionStatus } from './subscription.entity';
+import { Subscription, SubscriptionDocument, SubscriptionStatus } from './subscription.schema';
 import { CreateSubscriptionDto } from './dto/create-subscription.dto';
 import { CancelSubscriptionDto } from './dto/cancel-subscription.dto';
 import { RenewSubscriptionDto } from './dto/renew-subscription.dto';
-import { Plan } from '../plan/plan.entity';
-import { User } from '../user/user.entity';
-import { AuditLog } from '../audit-log/audit-log.entity';
+import { Plan, PlanDocument } from '../plan/plan.schema';
+import { User, UserDocument } from '../user/user.schema';
+import { AuditLog, AuditLogDocument } from '../audit-log/audit-log.schema';
 import { PaymentProviderFactory } from '../payment-provider/payment-provider.factory';
 
 @Injectable()
@@ -21,22 +16,17 @@ export class SubscriptionService {
   private readonly logger = new Logger(SubscriptionService.name);
 
   constructor(
-    @InjectRepository(Subscription)
-    private readonly subRepo: Repository<Subscription>,
-    @InjectRepository(Plan)
-    private readonly planRepo: Repository<Plan>,
-    @InjectRepository(User)
-    private readonly userRepo: Repository<User>,
-    @InjectRepository(AuditLog)
-    private readonly auditRepo: Repository<AuditLog>,
+    @InjectModel(Subscription.name) private readonly subModel: Model<SubscriptionDocument>,
+    @InjectModel(Plan.name) private readonly planModel: Model<PlanDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    @InjectModel(AuditLog.name) private readonly auditModel: Model<AuditLogDocument>,
     private readonly providerFactory: PaymentProviderFactory,
   ) {}
 
   // ─── createSub ────────────────────────────────────────────────────────────
-  // Validates user + plan, calls provider, persists subscription record
 
-  async createSub(dto: CreateSubscriptionDto): Promise<Subscription> {
-    const plan = await this.planRepo.findOne({ where: { id: dto.planId } });
+  async createSub(dto: CreateSubscriptionDto): Promise<SubscriptionDocument> {
+    const plan = await this.planModel.findById(dto.planId);
     if (!plan) throw new NotFoundException(`Plan #${dto.planId} not found`);
     if (!plan.isActive) throw new BadRequestException('Plan is not active');
 
@@ -53,13 +43,13 @@ export class SubscriptionService {
       trialDays: plan.trialDays,
     });
 
-    const sub = this.subRepo.create({
+    const saved = await this.subModel.create({
       userId: dto.userId,
       providerName,
       providerSubId: result.providerSubId,
       providerCustomerId: result.providerCustomerId,
       providerPmId: dto.providerPmId,
-      planId: plan.id,
+      planId: (plan as PlanDocument & { _id: { toString(): string } })._id.toString(),
       planName: plan.name,
       planAmount: plan.amount,
       status: result.status as SubscriptionStatus,
@@ -72,171 +62,161 @@ export class SubscriptionService {
       cancelledAt: null,
     });
 
-    const saved = await this.subRepo.save(sub);
-
     await this.writeAudit({
       entityId: saved.id,
       fromStatus: null,
       toStatus: saved.status,
       triggeredBy: 'user',
       triggeredById: dto.userId,
-      metadata: { planId: plan.id, providerSubId: result.providerSubId },
+      metadata: { planId: saved.planId, providerSubId: result.providerSubId },
     });
 
-    // Mark user as premium
-    await this.userRepo.update(dto.userId, { isPremium: true, plan: this.planKeyFromName(plan.name) });
+    await this.userModel.findByIdAndUpdate(dto.userId, {
+      isPremium: true,
+      plan: this.planKeyFromName(plan.name),
+    });
 
     this.logger.log(`Subscription ${saved.id} created for user ${dto.userId} on plan ${plan.name}`);
     return saved;
   }
 
   // ─── subscribe ────────────────────────────────────────────────────────────
-  // Re-activates or upgrades an existing subscription to a new plan
 
-  async subscribe(subscriptionId: string, newPlanId: string): Promise<Subscription> {
+  async subscribe(subscriptionId: string, newPlanId: string): Promise<SubscriptionDocument> {
     const sub = await this.findOneOrFail(subscriptionId);
-    const plan = await this.planRepo.findOne({ where: { id: newPlanId } });
+    const plan = await this.planModel.findById(newPlanId);
     if (!plan) throw new NotFoundException(`Plan #${newPlanId} not found`);
 
     const provider = await this.providerFactory.getProvider(sub.providerName);
-
     const result = await provider.renewSubscription(sub.providerSubId);
 
     const prevStatus = sub.status;
-    sub.planId = plan.id;
-    sub.planName = plan.name;
-    sub.planAmount = plan.amount;
-    sub.status = result.status as SubscriptionStatus;
-    sub.currentPeriodStart = result.currentPeriodStart;
-    sub.currentPeriodEnd = result.currentPeriodEnd;
-    sub.cancelAtPeriodEnd = false;
-    sub.cancelledAt = null;
-    sub.failedAttempts = 0;
-    sub.nextRetryAt = null;
-
-    const updated = await this.subRepo.save(sub);
+    sub.set({
+      planId: (plan as PlanDocument & { _id: { toString(): string } })._id.toString(),
+      planName: plan.name,
+      planAmount: plan.amount,
+      status: result.status as SubscriptionStatus,
+      currentPeriodStart: result.currentPeriodStart,
+      currentPeriodEnd: result.currentPeriodEnd,
+      cancelAtPeriodEnd: false,
+      cancelledAt: null,
+      failedAttempts: 0,
+      nextRetryAt: null,
+    });
+    await sub.save();
 
     await this.writeAudit({
       entityId: sub.id,
       fromStatus: prevStatus,
-      toStatus: updated.status,
+      toStatus: sub.status,
       triggeredBy: 'user',
       triggeredById: sub.userId,
-      metadata: { newPlanId: plan.id },
+      metadata: { newPlanId },
     });
 
-    await this.userRepo.update(sub.userId, { isPremium: true, plan: this.planKeyFromName(plan.name) });
+    await this.userModel.findByIdAndUpdate(sub.userId, {
+      isPremium: true,
+      plan: this.planKeyFromName(plan.name),
+    });
 
     this.logger.log(`Subscription ${sub.id} upgraded to plan ${plan.name}`);
-    return updated;
+    return sub;
   }
 
   // ─── cancelSub ────────────────────────────────────────────────────────────
 
-  async cancelSub(subscriptionId: string, dto: CancelSubscriptionDto): Promise<Subscription> {
+  async cancelSub(subscriptionId: string, dto: CancelSubscriptionDto): Promise<SubscriptionDocument> {
     const sub = await this.findOneOrFail(subscriptionId);
-
     if (sub.status === SubscriptionStatus.CANCELED) {
       throw new BadRequestException('Subscription is already cancelled.');
     }
 
     const atPeriodEnd = dto.atPeriodEnd ?? true;
     const provider = await this.providerFactory.getProvider(sub.providerName);
-
     const result = await provider.cancelSubscription(sub.providerSubId, atPeriodEnd);
 
     const prevStatus = sub.status;
-    sub.status = result.status as SubscriptionStatus;
-    sub.cancelAtPeriodEnd = result.cancelAtPeriodEnd;
-
-    if (!atPeriodEnd) {
-      sub.cancelledAt = new Date();
-      sub.status = SubscriptionStatus.CANCELED;
-    }
-
-    const updated = await this.subRepo.save(sub);
+    sub.set({
+      status: atPeriodEnd ? (result.status as SubscriptionStatus) : SubscriptionStatus.CANCELED,
+      cancelAtPeriodEnd: result.cancelAtPeriodEnd,
+      cancelledAt: atPeriodEnd ? null : new Date(),
+    });
+    await sub.save();
 
     await this.writeAudit({
       entityId: sub.id,
       fromStatus: prevStatus,
-      toStatus: updated.status,
+      toStatus: sub.status,
       triggeredBy: 'user',
       triggeredById: sub.userId,
       metadata: { atPeriodEnd },
     });
 
     if (!atPeriodEnd) {
-      await this.userRepo.update(sub.userId, { isPremium: false, plan: 'basic' });
+      await this.userModel.findByIdAndUpdate(sub.userId, { isPremium: false, plan: 'basic' });
     }
 
     this.logger.log(`Subscription ${sub.id} cancelled (atPeriodEnd=${atPeriodEnd})`);
-    return updated;
+    return sub;
   }
 
   // ─── renewSub ─────────────────────────────────────────────────────────────
-  // Used by webhook handler on invoice.paid — auto-renew billing cycle
 
-  async renewSub(subscriptionId: string, dto: RenewSubscriptionDto): Promise<Subscription> {
+  async renewSub(subscriptionId: string, dto: RenewSubscriptionDto): Promise<SubscriptionDocument> {
     const sub = await this.findOneOrFail(subscriptionId);
     const provider = await this.providerFactory.getProvider(sub.providerName);
-
     const result = await provider.renewSubscription(sub.providerSubId, dto.newProviderPmId);
 
     const prevStatus = sub.status;
-    sub.status = result.status as SubscriptionStatus;
-    sub.currentPeriodStart = result.currentPeriodStart;
-    sub.currentPeriodEnd = result.currentPeriodEnd;
-    sub.failedAttempts = 0;
-    sub.nextRetryAt = null;
-    if (dto.newProviderPmId) sub.providerPmId = dto.newProviderPmId;
-
-    const updated = await this.subRepo.save(sub);
+    sub.set({
+      status: result.status as SubscriptionStatus,
+      currentPeriodStart: result.currentPeriodStart,
+      currentPeriodEnd: result.currentPeriodEnd,
+      failedAttempts: 0,
+      nextRetryAt: null,
+      ...(dto.newProviderPmId ? { providerPmId: dto.newProviderPmId } : {}),
+    });
+    await sub.save();
 
     await this.writeAudit({
       entityId: sub.id,
       fromStatus: prevStatus,
-      toStatus: updated.status,
+      toStatus: sub.status,
       triggeredBy: 'system',
       triggeredById: 'auto-renew',
       metadata: { newPeriodEnd: result.currentPeriodEnd },
     });
 
     this.logger.log(`Subscription ${sub.id} renewed — next period ends ${result.currentPeriodEnd}`);
-    return updated;
+    return sub;
   }
 
-  // ─── findAll ──────────────────────────────────────────────────────────────
+  // ─── queries ──────────────────────────────────────────────────────────────
 
-  findAll(userId?: string): Promise<Subscription[]> {
-    const where = userId ? { userId } : {};
-    return this.subRepo.find({ where, relations: { plan: true }, order: { createdAt: 'DESC' } });
+  findAll(userId?: string): Promise<SubscriptionDocument[]> {
+    const filter = userId ? { userId } : {};
+    return this.subModel.find(filter).sort({ createdAt: -1 }).exec();
   }
 
-  // ─── findOne ──────────────────────────────────────────────────────────────
-
-  findOne(id: string): Promise<Subscription> {
+  findOne(id: string): Promise<SubscriptionDocument> {
     return this.findOneOrFail(id);
   }
 
   // ─── private helpers ──────────────────────────────────────────────────────
 
-  private async findOneOrFail(id: string): Promise<Subscription> {
-    const sub = await this.subRepo.findOne({ where: { id }, relations: { plan: true } });
+  private async findOneOrFail(id: string): Promise<SubscriptionDocument> {
+    const sub = await this.subModel.findById(id).exec();
     if (!sub) throw new NotFoundException(`Subscription #${id} not found`);
     return sub;
   }
 
   private async ensureUserExists(userId: string): Promise<void> {
-    const user = await this.userRepo.findOne({ where: { id: userId } });
+    const user = await this.userModel.findById(userId).exec();
     if (!user) throw new NotFoundException(`User #${userId} not found`);
   }
 
   private planKeyFromName(name: string): string {
-    const map: Record<string, string> = {
-      Basic: 'basic',
-      Pro: 'pro',
-      'Pro Plus': 'pro_plus',
-    };
+    const map: Record<string, string> = { Basic: 'basic', Pro: 'pro', 'Pro Plus': 'pro_plus' };
     return map[name] ?? 'basic';
   }
 
@@ -248,16 +228,10 @@ export class SubscriptionService {
     triggeredById: string;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
-    await this.auditRepo.save(
-      this.auditRepo.create({
-        entityType: 'subscription',
-        entityId: data.entityId,
-        fromStatus: data.fromStatus,
-        toStatus: data.toStatus,
-        triggeredBy: data.triggeredBy,
-        triggeredById: data.triggeredById,
-        metadata: data.metadata ?? {},
-      }),
-    );
+    await this.auditModel.create({
+      entityType: 'subscription',
+      ...data,
+      metadata: data.metadata ?? {},
+    });
   }
 }

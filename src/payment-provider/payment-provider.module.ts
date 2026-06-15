@@ -1,11 +1,13 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { MongooseModule } from '@nestjs/mongoose';
 import { StripeProvider } from './providers/stripe.provider';
 import { PaymentProviderFactory } from './payment-provider.factory';
-import { PaymentProviderConfig } from './payment-provider-config.entity';
+import { PaymentProviderConfig, PaymentProviderConfigSchema } from './payment-provider-config.schema';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([PaymentProviderConfig])],
+  imports: [
+    MongooseModule.forFeature([{ name: PaymentProviderConfig.name, schema: PaymentProviderConfigSchema }]),
+  ],
   providers: [StripeProvider, PaymentProviderFactory],
   exports: [PaymentProviderFactory],
 })

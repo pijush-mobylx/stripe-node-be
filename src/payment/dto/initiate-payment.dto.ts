@@ -1,10 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsString, IsUrl, IsUUID } from 'class-validator';
-import { PaymentType } from '../payment.entity';
+import { IsEnum, IsMongoId, IsUrl } from 'class-validator';
+import { PaymentType } from '../payment.schema';
 
 export class InitiatePaymentDto {
-  @ApiProperty({ example: 'uuid-of-plan' })
-  @IsUUID()
+  @ApiProperty({ example: '6650a1b2c3d4e5f6a7b8c9d0' })
+  @IsMongoId()
   planId: string;
 
   @ApiProperty({ enum: PaymentType, example: PaymentType.ONE_TIME })

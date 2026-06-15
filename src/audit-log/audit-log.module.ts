@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { AuditLog } from './audit-log.entity';
+import { MongooseModule } from '@nestjs/mongoose';
+import { AuditLog, AuditLogSchema } from './audit-log.schema';
 
-@Module({ imports: [TypeOrmModule.forFeature([AuditLog])], exports: [TypeOrmModule] })
+@Module({
+  imports: [MongooseModule.forFeature([{ name: AuditLog.name, schema: AuditLogSchema }])],
+  exports: [MongooseModule],
+})
 export class AuditLogModule {}

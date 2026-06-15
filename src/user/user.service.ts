@@ -1,52 +1,42 @@
-import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { User } from './user.entity';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { User, UserDocument } from './user.schema';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
 @Injectable()
 export class UserService {
-  constructor(
-    @InjectRepository(User)
-    private readonly userRepository: Repository<User>,
-  ) {}
+  constructor(@InjectModel(User.name) private readonly userModel: Model<UserDocument>) {}
 
-  async create(createUserDto: CreateUserDto): Promise<User> {
-    const existing = await this.userRepository.findOne({
-      where: { email: createUserDto.email },
-    });
-    if (existing) {
-      throw new ConflictException('Email already in use');
-    }
-    const user = this.userRepository.create(createUserDto);
-    return this.userRepository.save(user);
+  async create(dto: CreateUserDto): Promise<UserDocument> {
+    const exists = await this.userModel.findOne({ email: dto.email.toLowerCase() });
+    if (exists) throw new ConflictException('Email already in use');
+    return this.userModel.create(dto);
   }
 
-  async findAll(): Promise<User[]> {
-    return this.userRepository.find();
+  findAll(): Promise<UserDocument[]> {
+    return this.userModel.find().sort({ createdAt: -1 }).exec();
   }
 
-  async findOne(id: string): Promise<User> {
-    const user = await this.userRepository.findOne({ where: { id } });
-    if (!user) {
-      throw new NotFoundException(`User #${id} not found`);
-    }
+  async findOne(id: string): Promise<UserDocument> {
+    const user = await this.userModel.findById(id).exec();
+    if (!user) throw new NotFoundException(`User #${id} not found`);
     return user;
   }
 
-  async update(id: string, updateUserDto: UpdateUserDto): Promise<User> {
-    const user = await this.findOne(id);
-    Object.assign(user, updateUserDto);
-    return this.userRepository.save(user);
+  async findByEmail(email: string): Promise<UserDocument | null> {
+    return this.userModel.findOne({ email: email.toLowerCase() }).exec();
+  }
+
+  async update(id: string, dto: UpdateUserDto): Promise<UserDocument> {
+    const user = await this.userModel.findByIdAndUpdate(id, dto, { new: true }).exec();
+    if (!user) throw new NotFoundException(`User #${id} not found`);
+    return user;
   }
 
   async remove(id: string): Promise<void> {
-    const user = await this.findOne(id);
-    await this.userRepository.remove(user);
+    const result = await this.userModel.findByIdAndDelete(id).exec();
+    if (!result) throw new NotFoundException(`User #${id} not found`);
   }
 }

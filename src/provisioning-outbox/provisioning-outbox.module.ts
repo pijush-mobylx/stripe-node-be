@@ -1,11 +1,13 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { ProvisioningOutbox } from './provisioning-outbox.entity';
+import { MongooseModule } from '@nestjs/mongoose';
+import { ProvisioningOutbox, ProvisioningOutboxSchema } from './provisioning-outbox.schema';
 import { ProvisioningOutboxPoller } from './provisioning-outbox.poller';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([ProvisioningOutbox])],
+  imports: [
+    MongooseModule.forFeature([{ name: ProvisioningOutbox.name, schema: ProvisioningOutboxSchema }]),
+  ],
   providers: [ProvisioningOutboxPoller],
-  exports: [TypeOrmModule],
+  exports: [MongooseModule],
 })
 export class ProvisioningOutboxModule {}

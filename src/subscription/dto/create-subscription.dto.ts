@@ -1,13 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, IsUUID } from 'class-validator';
+import { IsMongoId, IsOptional, IsString } from 'class-validator';
 
 export class CreateSubscriptionDto {
-  @ApiProperty({ example: 'uuid-of-user' })
-  @IsUUID()
+  @ApiProperty({ example: '6650a1b2c3d4e5f6a7b8c9d0' })
+  @IsMongoId()
   userId: string;
 
-  @ApiProperty({ example: 'uuid-of-plan' })
-  @IsUUID()
+  @ApiProperty({ example: '6650a1b2c3d4e5f6a7b8c9d1' })
+  @IsMongoId()
   planId: string;
 
   @ApiProperty({ example: 'cus_stripe_customer_id' })

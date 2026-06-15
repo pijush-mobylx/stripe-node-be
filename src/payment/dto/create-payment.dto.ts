@@ -2,17 +2,17 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsEnum,
   IsInt,
+  IsMongoId,
   IsOptional,
   IsPositive,
   IsString,
-  IsUUID,
   Length,
 } from 'class-validator';
-import { PaymentType } from '../payment.entity';
+import { PaymentType } from '../payment.schema';
 
 export class CreatePaymentDto {
-  @ApiProperty({ example: 'uuid-of-user' })
-  @IsUUID()
+  @ApiProperty({ example: '6650a1b2c3d4e5f6a7b8c9d0' })
+  @IsMongoId()
   userId: string;
 
   @ApiProperty({ enum: PaymentType, example: PaymentType.ONE_TIME })
@@ -40,18 +40,18 @@ export class CreatePaymentDto {
 
   // ── ONE_TIME only ──────────────────────────────────────────────────────────
   @ApiPropertyOptional()
-  @IsUUID()
+  @IsMongoId()
   @IsOptional()
   orderId?: string;
 
   // ── SUBSCRIPTION only ──────────────────────────────────────────────────────
   @ApiPropertyOptional()
-  @IsUUID()
+  @IsMongoId()
   @IsOptional()
   subscriptionId?: string;
 
   @ApiPropertyOptional()
-  @IsUUID()
+  @IsMongoId()
   @IsOptional()
   planId?: string;
 }

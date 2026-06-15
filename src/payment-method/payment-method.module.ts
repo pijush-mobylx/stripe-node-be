@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { PaymentMethod } from './payment-method.entity';
+import { MongooseModule } from '@nestjs/mongoose';
+import { PaymentMethod, PaymentMethodSchema } from './payment-method.schema';
 
-@Module({ imports: [TypeOrmModule.forFeature([PaymentMethod])], exports: [TypeOrmModule] })
+@Module({
+  imports: [MongooseModule.forFeature([{ name: PaymentMethod.name, schema: PaymentMethodSchema }])],
+  exports: [MongooseModule],
+})
 export class PaymentMethodModule {}

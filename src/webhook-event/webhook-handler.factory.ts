@@ -1,11 +1,8 @@
-import {
-  Injectable,
-  Logger,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { Injectable, Logger } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 
-import { WebhookEvent, WebhookStatus } from './webhook-event.entity';
+import { WebhookEvent, WebhookEventDocument, WebhookStatus } from './webhook-event.schema';
 import { PaymentProviderFactory } from '../payment-provider/payment-provider.factory';
 import { PaymentCallbackService } from '../payment-callback/payment-callback.service';
 
@@ -14,13 +11,10 @@ export class WebhookHandlerFactory {
   private readonly logger = new Logger(WebhookHandlerFactory.name);
 
   constructor(
-    @InjectRepository(WebhookEvent)
-    private readonly webhookRepo: Repository<WebhookEvent>,
+    @InjectModel(WebhookEvent.name) private readonly webhookModel: Model<WebhookEventDocument>,
     private readonly providerFactory: PaymentProviderFactory,
     private readonly callbackService: PaymentCallbackService,
   ) {}
-
-  // ─── processWebhook ───────────────────────────────────────────────────────
 
   async processWebhook(
     providerName: string,
@@ -59,9 +53,9 @@ export class WebhookHandlerFactory {
   private async saveEventRecord(
     providerName: string,
     event: { providerEventId: string; type: string; payload: Record<string, unknown> },
-  ): Promise<WebhookEvent | null> {
+  ): Promise<WebhookEventDocument | null> {
     try {
-      const record = this.webhookRepo.create({
+      return await this.webhookModel.create({
         providerName,
         providerEventId: event.providerEventId,
         type: event.type,
@@ -71,9 +65,9 @@ export class WebhookHandlerFactory {
         lastError: null,
         processedAt: null,
       });
-      return await this.webhookRepo.save(record);
-    } catch (err) {
-      if (err instanceof QueryFailedError && (err as { code?: string }).code === '23505') {
+    } catch (err: unknown) {
+      const mongoErr = err as { code?: number };
+      if (mongoErr.code === 11000) {
         return null; // duplicate — already processed
       }
       throw err;

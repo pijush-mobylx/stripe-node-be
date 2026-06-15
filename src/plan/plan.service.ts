@@ -1,16 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Plan } from './plan.entity';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Plan, PlanDocument } from './plan.schema';
 
 @Injectable()
 export class PlanService {
-  constructor(
-    @InjectRepository(Plan)
-    private readonly planRepo: Repository<Plan>,
-  ) {}
+  constructor(@InjectModel(Plan.name) private readonly planModel: Model<PlanDocument>) {}
 
-  findAll(): Promise<Plan[]> {
-    return this.planRepo.find({ where: { isActive: true }, order: { amount: 'ASC' } });
+  findAll(): Promise<PlanDocument[]> {
+    return this.planModel.find({ isActive: true }).sort({ amount: 1 }).exec();
   }
 }

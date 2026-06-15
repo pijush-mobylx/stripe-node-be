@@ -4,36 +4,33 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 
-import { Payment, PaymentStatus } from './payment.entity';
+import { Payment, PaymentDocument, PaymentStatus } from './payment.schema';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { InitiatePaymentDto } from './dto/initiate-payment.dto';
 import { RefundPaymentDto } from './dto/refund-payment.dto';
 import { PaymentProviderFactory } from '../payment-provider/payment-provider.factory';
 import type { ProviderPayload } from '../payment-provider/dto/checkout-session.dto';
-import { AuditLog } from '../audit-log/audit-log.entity';
-import { Plan } from '../plan/plan.entity';
+import { AuditLog, AuditLogDocument } from '../audit-log/audit-log.schema';
+import { Plan, PlanDocument } from '../plan/plan.schema';
 
 @Injectable()
 export class PaymentService {
   private readonly logger = new Logger(PaymentService.name);
 
   constructor(
-    @InjectRepository(Payment)
-    private readonly paymentRepo: Repository<Payment>,
-    @InjectRepository(AuditLog)
-    private readonly auditRepo: Repository<AuditLog>,
-    @InjectRepository(Plan)
-    private readonly planRepo: Repository<Plan>,
+    @InjectModel(Payment.name) private readonly paymentModel: Model<PaymentDocument>,
+    @InjectModel(AuditLog.name) private readonly auditModel: Model<AuditLogDocument>,
+    @InjectModel(Plan.name) private readonly planModel: Model<PlanDocument>,
     private readonly providerFactory: PaymentProviderFactory,
   ) {}
 
-  // ─── initiatePayment (new gateway flow) ──────────────────────────────────
+  // ─── initiatePayment ──────────────────────────────────────────────────────
 
   async initiatePayment(userId: string, dto: InitiatePaymentDto): Promise<ProviderPayload> {
-    const plan = await this.planRepo.findOne({ where: { id: dto.planId } });
+    const plan = await this.planModel.findById(dto.planId).exec();
     if (!plan) throw new NotFoundException(`Plan #${dto.planId} not found`);
     if (!plan.isActive) throw new BadRequestException(`Plan #${dto.planId} is inactive`);
 
@@ -44,14 +41,14 @@ export class PaymentService {
 
     const payload = await provider.createCheckoutSession({
       userId,
-      planId: plan.id,
+      planId: plan._id.toString(),
       providerPlanId: plan.providerPlanId,
       paymentType: dto.paymentType,
       successUrl: dto.successUrl,
       cancelUrl: dto.cancelUrl,
     });
 
-    const payment = this.paymentRepo.create({
+    const saved = await this.paymentModel.create({
       userId,
       type: dto.paymentType,
       providerName: provider.providerName,
@@ -59,28 +56,26 @@ export class PaymentService {
       amount: plan.amount,
       status: PaymentStatus.INITIATED,
       frozen: false,
-      planId: plan.id,
+      planId: plan._id.toString(),
     });
-
-    const saved = await this.paymentRepo.save(payment);
 
     await this.writeAudit({
       entityType: 'payment',
-      entityId: saved.id,
+      entityId: saved._id.toString(),
       fromStatus: null,
       toStatus: PaymentStatus.INITIATED,
       triggeredBy: 'user',
       triggeredById: userId,
-      metadata: { sessionId: payload.sessionId, planId: plan.id, currency: plan.currency },
+      metadata: { sessionId: payload.sessionId, planId: plan._id.toString(), currency: plan.currency },
     });
 
-    this.logger.log(`Payment ${saved.id} initiated — session ${payload.sessionId}`);
+    this.logger.log(`Payment ${saved._id} initiated — session ${payload.sessionId}`);
     return payload;
   }
 
   // ─── createPayment ────────────────────────────────────────────────────────
 
-  async createPayment(dto: CreatePaymentDto): Promise<Payment> {
+  async createPayment(dto: CreatePaymentDto): Promise<PaymentDocument> {
     const provider = await this.providerFactory.getProvider(dto.providerName);
 
     const session = await provider.createSession({
@@ -91,7 +86,7 @@ export class PaymentService {
       description: dto.description ?? '',
     });
 
-    const payment = this.paymentRepo.create({
+    const saved = await this.paymentModel.create({
       userId: dto.userId,
       type: dto.type,
       providerName: dto.providerName,
@@ -104,11 +99,9 @@ export class PaymentService {
       planId: dto.planId ?? null,
     });
 
-    const saved = await this.paymentRepo.save(payment);
-
     await this.writeAudit({
       entityType: 'payment',
-      entityId: saved.id,
+      entityId: saved._id.toString(),
       fromStatus: null,
       toStatus: PaymentStatus.INITIATED,
       triggeredBy: 'user',
@@ -116,13 +109,13 @@ export class PaymentService {
       metadata: { providerIntentId: session.providerIntentId, clientSecret: session.clientSecret },
     });
 
-    this.logger.log(`Payment ${saved.id} created — intent ${session.providerIntentId}`);
+    this.logger.log(`Payment ${saved._id} created — intent ${session.providerIntentId}`);
     return saved;
   }
 
   // ─── retryPayment ─────────────────────────────────────────────────────────
 
-  async retryPayment(paymentId: string): Promise<Payment> {
+  async retryPayment(paymentId: string): Promise<PaymentDocument> {
     const payment = await this.findOneOrFail(paymentId);
 
     if (payment.frozen) {
@@ -136,67 +129,60 @@ export class PaymentService {
     const result = await provider.getStatus(payment.providerIntentId);
 
     const prevStatus = payment.status;
-    payment.status = result.status as PaymentStatus;
-
-    if (result.frozen) {
-      payment.frozen = true;
-    }
-
-    const updated = await this.paymentRepo.save(payment);
+    payment.set({ status: result.status as PaymentStatus, ...(result.frozen ? { frozen: true } : {}) });
+    await payment.save();
 
     await this.writeAudit({
       entityType: 'payment',
-      entityId: payment.id,
+      entityId: payment._id.toString(),
       fromStatus: prevStatus,
-      toStatus: updated.status,
+      toStatus: payment.status,
       triggeredBy: 'system',
       triggeredById: 'retry',
       metadata: { providerIntentId: payment.providerIntentId },
     });
 
-    this.logger.log(`Retried payment ${paymentId} — status: ${updated.status}`);
-    return updated;
+    this.logger.log(`Retried payment ${paymentId} — status: ${payment.status}`);
+    return payment;
   }
 
   // ─── getStatus ────────────────────────────────────────────────────────────
 
-  async getStatus(paymentId: string): Promise<Payment> {
+  async getStatus(paymentId: string): Promise<PaymentDocument> {
     return this.findOneOrFail(paymentId);
   }
 
-  // ─── syncProviderStatus (sync provider knowledge) ─────────────────────────
+  // ─── syncProviderStatus ───────────────────────────────────────────────────
 
-  async syncProviderStatus(paymentId: string): Promise<Payment> {
+  async syncProviderStatus(paymentId: string): Promise<PaymentDocument> {
     const payment = await this.findOneOrFail(paymentId);
     const provider = await this.providerFactory.getProvider(payment.providerName);
 
     const result = await provider.getStatus(payment.providerIntentId);
 
     const prevStatus = payment.status;
-    payment.status = result.status as PaymentStatus;
-    payment.frozen = result.frozen;
+    payment.set({ status: result.status as PaymentStatus, frozen: result.frozen });
+    await payment.save();
 
-    const updated = await this.paymentRepo.save(payment);
-
-    if (prevStatus !== updated.status) {
+    if (prevStatus !== payment.status) {
       await this.writeAudit({
         entityType: 'payment',
-        entityId: payment.id,
+        entityId: payment._id.toString(),
         fromStatus: prevStatus,
-        toStatus: updated.status,
+        toStatus: payment.status,
         triggeredBy: 'system',
         triggeredById: 'sync',
         metadata: { providerIntentId: payment.providerIntentId },
       });
-      this.logger.log(`Synced payment ${paymentId}: ${prevStatus} → ${updated.status}`);
+      this.logger.log(`Synced payment ${paymentId}: ${prevStatus} → ${payment.status}`);
     }
 
-    return updated;
+    return payment;
   }
 
   // ─── refundPayment ────────────────────────────────────────────────────────
 
-  async refundPayment(paymentId: string, dto: RefundPaymentDto): Promise<Payment> {
+  async refundPayment(paymentId: string, dto: RefundPaymentDto): Promise<PaymentDocument> {
     const payment = await this.findOneOrFail(paymentId);
 
     if (payment.status !== PaymentStatus.SUCCESS) {
@@ -212,12 +198,12 @@ export class PaymentService {
     });
 
     const prevStatus = payment.status;
-    payment.status = PaymentStatus.REFUNDED;
-    const updated = await this.paymentRepo.save(payment);
+    payment.set({ status: PaymentStatus.REFUNDED });
+    await payment.save();
 
     await this.writeAudit({
       entityType: 'payment',
-      entityId: payment.id,
+      entityId: payment._id.toString(),
       fromStatus: prevStatus,
       toStatus: PaymentStatus.REFUNDED,
       triggeredBy: 'user',
@@ -226,20 +212,20 @@ export class PaymentService {
     });
 
     this.logger.log(`Payment ${paymentId} refunded`);
-    return updated;
+    return payment;
   }
 
   // ─── findAll ──────────────────────────────────────────────────────────────
 
-  findAll(userId?: string): Promise<Payment[]> {
-    const where = userId ? { userId } : {};
-    return this.paymentRepo.find({ where, order: { createdAt: 'DESC' } });
+  findAll(userId?: string): Promise<PaymentDocument[]> {
+    const filter = userId ? { userId } : {};
+    return this.paymentModel.find(filter).sort({ createdAt: -1 }).exec();
   }
 
   // ─── private helpers ──────────────────────────────────────────────────────
 
-  private async findOneOrFail(id: string): Promise<Payment> {
-    const payment = await this.paymentRepo.findOne({ where: { id } });
+  private async findOneOrFail(id: string): Promise<PaymentDocument> {
+    const payment = await this.paymentModel.findById(id).exec();
     if (!payment) throw new NotFoundException(`Payment #${id} not found`);
     return payment;
   }
@@ -253,16 +239,14 @@ export class PaymentService {
     triggeredById: string;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
-    await this.auditRepo.save(
-      this.auditRepo.create({
-        entityType: data.entityType,
-        entityId: data.entityId,
-        fromStatus: data.fromStatus,
-        toStatus: data.toStatus,
-        triggeredBy: data.triggeredBy,
-        triggeredById: data.triggeredById,
-        metadata: data.metadata ?? {},
-      }),
-    );
+    await this.auditModel.create({
+      entityType: data.entityType,
+      entityId: data.entityId,
+      fromStatus: data.fromStatus,
+      toStatus: data.toStatus,
+      triggeredBy: data.triggeredBy,
+      triggeredById: data.triggeredById,
+      metadata: data.metadata ?? {},
+    });
   }
 }

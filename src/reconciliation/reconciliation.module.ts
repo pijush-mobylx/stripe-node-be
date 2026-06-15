@@ -1,14 +1,18 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { MongooseModule } from '@nestjs/mongoose';
 import { ReconciliationScheduler } from './reconciliation.scheduler';
-import { Payment } from '../payment/payment.entity';
-import { AuditLog } from '../audit-log/audit-log.entity';
-import { ProvisioningOutbox } from '../provisioning-outbox/provisioning-outbox.entity';
+import { Payment, PaymentSchema } from '../payment/payment.schema';
+import { AuditLog, AuditLogSchema } from '../audit-log/audit-log.schema';
+import { ProvisioningOutbox, ProvisioningOutboxSchema } from '../provisioning-outbox/provisioning-outbox.schema';
 import { PaymentProviderModule } from '../payment-provider/payment-provider.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Payment, AuditLog, ProvisioningOutbox]),
+    MongooseModule.forFeature([
+      { name: Payment.name, schema: PaymentSchema },
+      { name: AuditLog.name, schema: AuditLogSchema },
+      { name: ProvisioningOutbox.name, schema: ProvisioningOutboxSchema },
+    ]),
     PaymentProviderModule,
   ],
   providers: [ReconciliationScheduler],

@@ -1,9 +1,9 @@
 import { Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { StripeProvider } from './providers/stripe.provider';
 import type { IPaymentProvider } from './interfaces/payment-provider.interface';
-import { PaymentProviderConfig } from './payment-provider-config.entity';
+import { PaymentProviderConfig, PaymentProviderConfigDocument } from './payment-provider-config.schema';
 
 export interface PlanProviderConfig {
   providerName: string;
@@ -25,8 +25,8 @@ export class PaymentProviderFactory {
 
   constructor(
     private readonly stripeProvider: StripeProvider,
-    @InjectRepository(PaymentProviderConfig)
-    private readonly configRepo: Repository<PaymentProviderConfig>,
+    @InjectModel(PaymentProviderConfig.name)
+    private readonly configModel: Model<PaymentProviderConfigDocument>,
   ) {
     this.register(stripeProvider);
   }
@@ -36,10 +36,6 @@ export class PaymentProviderFactory {
     this.logger.log(`Registered payment provider: ${provider.providerName}`);
   }
 
-  /**
-   * Returns an active provider by name.
-   * Throws NotFoundException if not registered, ServiceUnavailableException if inactive.
-   */
   async getProvider(name: string): Promise<IPaymentProvider> {
     const key = name.toLowerCase();
     const provider = this.registry.get(key);
@@ -52,9 +48,6 @@ export class PaymentProviderFactory {
     return provider;
   }
 
-  /**
-   * Returns an active provider based on plan config + currency.
-   */
   async getProviderByPlanConfig(config: PlanProviderConfig): Promise<IPaymentProvider> {
     const name = this.resolveProviderName(config);
     return this.getProvider(name);
@@ -64,8 +57,6 @@ export class PaymentProviderFactory {
     return [...this.registry.keys()];
   }
 
-  // ─── isActive check with TTL cache ────────────────────────────────────────
-
   private async assertActive(providerName: string): Promise<void> {
     const cached = this.configCache.get(providerName);
     if (cached && Date.now() < cached.expiresAt) {
@@ -73,9 +64,8 @@ export class PaymentProviderFactory {
       return;
     }
 
-    const config = await this.configRepo.findOne({ where: { providerName } });
+    const config = await this.configModel.findOne({ providerName }).exec();
 
-    // No DB row means provider is allowed (opt-in model — row required only to disable)
     const isActive = config ? config.isActive : true;
 
     this.configCache.set(providerName, {
@@ -91,8 +81,6 @@ export class PaymentProviderFactory {
       `Payment provider "${providerName}" is currently disabled`,
     );
   }
-
-  // ─── currency routing ─────────────────────────────────────────────────────
 
   private resolveProviderName(config: PlanProviderConfig): string {
     if (config.providerName) return config.providerName.toLowerCase();
