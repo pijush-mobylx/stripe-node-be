@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException, ServiceUnavailableException } fr
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { StripeProvider } from './providers/stripe.provider';
+import { CCAvenueProvider } from './providers/ccavenue.provider';
 import type { IPaymentProvider } from './interfaces/payment-provider.interface';
 import { PaymentProviderConfig, PaymentProviderConfigDocument } from './payment-provider-config.schema';
 
@@ -25,10 +26,12 @@ export class PaymentProviderFactory {
 
   constructor(
     private readonly stripeProvider: StripeProvider,
+    private readonly ccavenueProvider: CCAvenueProvider,
     @InjectModel(PaymentProviderConfig.name)
     private readonly configModel: Model<PaymentProviderConfigDocument>,
   ) {
     this.register(stripeProvider);
+    this.register(ccavenueProvider);
   }
 
   private register(provider: IPaymentProvider): void {

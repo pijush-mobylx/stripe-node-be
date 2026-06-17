@@ -4,6 +4,7 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 
@@ -25,6 +26,7 @@ export class PaymentService {
     @InjectModel(AuditLog.name) private readonly auditModel: Model<AuditLogDocument>,
     @InjectModel(Plan.name) private readonly planModel: Model<PlanDocument>,
     private readonly providerFactory: PaymentProviderFactory,
+    private readonly config: ConfigService,
   ) {}
 
   // ─── initiatePayment ──────────────────────────────────────────────────────
@@ -46,6 +48,8 @@ export class PaymentService {
       paymentType: dto.paymentType,
       successUrl: dto.successUrl,
       cancelUrl: dto.cancelUrl,
+      amount: plan.amount,
+      currency: plan.currency,
     });
 
     const saved = await this.paymentModel.create({
@@ -213,6 +217,69 @@ export class PaymentService {
 
     this.logger.log(`Payment ${paymentId} refunded`);
     return payment;
+  }
+
+  // ─── handleCCAvenueCallback ───────────────────────────────────────────────
+  // Called when CCAvenue redirects the user's browser back after payment.
+  // Decrypts the encResp, updates the payment record, returns a frontend redirect URL.
+
+  async handleCCAvenueCallback(encResp: string): Promise<{ redirectUrl: string }> {
+    const frontendUrl = this.config.get<string>('FRONTEND_URL', 'http://localhost:5173');
+
+    const provider = await this.providerFactory.getProvider('ccavenue');
+    let event: Awaited<ReturnType<typeof provider.verifyWebhook>>;
+
+    try {
+      event = await provider.verifyWebhook({
+        rawBody: Buffer.from(encResp),
+        signature: '',
+      });
+    } catch (err) {
+      this.logger.error(`CCAvenue callback decryption error: ${(err as Error).message}`);
+      return { redirectUrl: `${frontendUrl}/payment/failed` };
+    }
+
+    const orderId    = event.payload['order_id']     as string;
+    const trackingId = event.payload['tracking_id']  as string;
+    const orderStatus = event.payload['order_status'] as string;
+
+    const payment = await this.paymentModel.findOne({ providerIntentId: orderId }).exec();
+
+    if (!payment) {
+      this.logger.warn(`CCAvenue callback: no payment for order_id=${orderId}`);
+      return { redirectUrl: `${frontendUrl}/payment/failed` };
+    }
+
+    const terminalStatuses: PaymentStatus[] = [PaymentStatus.SUCCESS, PaymentStatus.FAILED, PaymentStatus.EXPIRED];
+    if (terminalStatuses.includes(payment.status)) {
+      this.logger.log(`CCAvenue callback: payment ${payment._id} already in terminal state — skipping`);
+      const destination = payment.status === PaymentStatus.SUCCESS ? 'success' : 'failed';
+      return { redirectUrl: `${frontendUrl}/payment/${destination}` };
+    }
+
+    const targetStatus =
+      orderStatus === 'Success' ? PaymentStatus.SUCCESS :
+      orderStatus === 'Aborted' ? PaymentStatus.EXPIRED :
+      PaymentStatus.FAILED;
+
+    const prevStatus = payment.status;
+    payment.set({ status: targetStatus });
+    await payment.save();
+
+    await this.writeAudit({
+      entityType: 'payment',
+      entityId: payment._id.toString(),
+      fromStatus: prevStatus,
+      toStatus: targetStatus,
+      triggeredBy: 'ccavenue_callback',
+      triggeredById: trackingId,
+      metadata: { orderStatus, trackingId, orderId },
+    });
+
+    this.logger.log(`CCAvenue payment ${payment._id}: ${prevStatus} → ${targetStatus} (tracking=${trackingId})`);
+
+    const destination = targetStatus === PaymentStatus.SUCCESS ? 'success' : 'failed';
+    return { redirectUrl: `${frontendUrl}/payment/${destination}?orderId=${orderId}` };
   }
 
   // ─── findAll ──────────────────────────────────────────────────────────────

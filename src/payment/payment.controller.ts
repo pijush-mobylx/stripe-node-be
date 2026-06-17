@@ -2,9 +2,12 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Post,
   Query,
+  Redirect,
   Request,
   UseGuards,
 } from '@nestjs/common';
@@ -76,5 +79,18 @@ export class PaymentController {
   @ApiParam({ name: 'id' })
   refund(@Param('id') id: string, @Body() dto: RefundPaymentDto) {
     return this.paymentService.refundPayment(id, dto);
+  }
+
+  // ─── CCAvenue callback ────────────────────────────────────────────────────
+  // CCAvenue POSTs application/x-www-form-urlencoded with `encResp` after payment.
+  // We decrypt, update the payment, then redirect the user's browser to the frontend.
+
+  @Post('ccavenue/callback')
+  @HttpCode(HttpStatus.OK)
+  @Redirect()
+  @ApiOperation({ summary: 'CCAvenue payment callback — receives encrypted result and redirects to frontend' })
+  async ccavenueCallback(@Body('encResp') encResp: string) {
+    const result = await this.paymentService.handleCCAvenueCallback(encResp);
+    return { url: result.redirectUrl, statusCode: HttpStatus.FOUND };
   }
 }

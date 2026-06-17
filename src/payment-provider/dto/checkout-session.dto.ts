@@ -7,6 +7,10 @@ export interface CreateCheckoutSessionDto {
   paymentType: string;
   successUrl: string;
   cancelUrl: string;
+  /** Amount in smallest currency unit (paise/cents). Required for CCAvenue. */
+  amount?: number;
+  /** ISO-4217 currency code e.g. "INR". Required for CCAvenue. */
+  currency?: string;
   metadata?: Record<string, string>;
 }
 
